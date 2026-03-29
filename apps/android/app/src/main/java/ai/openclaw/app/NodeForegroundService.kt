@@ -8,6 +8,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -18,21 +19,45 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
 class NodeForegroundService : Service() {
+  companion object {
+    private const val TAG = "NodeForegroundService"
+    private const val CHANNEL_ID = "connection"
+    private const val NOTIFICATION_ID = 1
+
+    private const val ACTION_STOP = "ai.openclaw.app.action.STOP"
+
+    fun start(context: Context) {
+      Log.i(TAG, "start() called")
+      val intent = Intent(context, NodeForegroundService::class.java)
+      context.startForegroundService(intent)
+    }
+
+    fun stop(context: Context) {
+      Log.i(TAG, "stop() called")
+      val intent = Intent(context, NodeForegroundService::class.java).setAction(ACTION_STOP)
+      context.startService(intent)
+    }
+  }
+  
   private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
   private var notificationJob: Job? = null
   private var didStartForeground = false
 
   override fun onCreate() {
     super.onCreate()
+    Log.i(TAG, "onCreate() called")
     ensureChannel()
     val initial = buildNotification(title = "OpenClaw Node", text = "Starting…")
+    Log.d(TAG, "Starting foreground service with initial notification")
     startForegroundWithTypes(notification = initial)
 
     val runtime = (application as NodeApp).peekRuntime()
     if (runtime == null) {
+      Log.w(TAG, "No runtime available - stopping service")
       stopSelf()
       return
     }
+    Log.i(TAG, "Starting notification update loop")
     notificationJob =
       scope.launch {
         combine(
@@ -44,6 +69,7 @@ class NodeForegroundService : Service() {
         ) { status, server, connected, micEnabled, micListening ->
           Quint(status, server, connected, micEnabled, micListening)
         }.collect { (status, server, connected, micEnabled, micListening) ->
+          Log.d(TAG, "Notification update: title=${if (connected) "Connected" else "Node"}, status=$status")
           val title = if (connected) "OpenClaw Node · Connected" else "OpenClaw Node"
           val micSuffix =
             if (micEnabled) {
@@ -61,8 +87,10 @@ class NodeForegroundService : Service() {
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+    Log.d(TAG, "onStartCommand() action=${intent?.action}, startId=$startId")
     when (intent?.action) {
       ACTION_STOP -> {
+        Log.i(TAG, "Stop action received - disconnecting and stopping")
         (application as NodeApp).peekRuntime()?.disconnect()
         stopSelf()
         return START_NOT_STICKY
@@ -73,6 +101,7 @@ class NodeForegroundService : Service() {
   }
 
   override fun onDestroy() {
+    Log.i(TAG, "onDestroy() called")
     notificationJob?.cancel()
     scope.cancel()
     super.onDestroy()
@@ -81,6 +110,7 @@ class NodeForegroundService : Service() {
   override fun onBind(intent: Intent?) = null
 
   private fun ensureChannel() {
+    Log.d(TAG, "Creating notification channel")
     val mgr = getSystemService(NotificationManager::class.java)
     val channel =
       NotificationChannel(
@@ -95,6 +125,7 @@ class NodeForegroundService : Service() {
   }
 
   private fun buildNotification(title: String, text: String): Notification {
+    Log.d(TAG, "Building notification: title=$title")
     val launchIntent = Intent(this, MainActivity::class.java).apply {
       flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
     }
@@ -139,23 +170,6 @@ class NodeForegroundService : Service() {
     }
     startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
     didStartForeground = true
-  }
-
-  companion object {
-    private const val CHANNEL_ID = "connection"
-    private const val NOTIFICATION_ID = 1
-
-    private const val ACTION_STOP = "ai.openclaw.app.action.STOP"
-
-    fun start(context: Context) {
-      val intent = Intent(context, NodeForegroundService::class.java)
-      context.startForegroundService(intent)
-    }
-
-    fun stop(context: Context) {
-      val intent = Intent(context, NodeForegroundService::class.java).setAction(ACTION_STOP)
-      context.startService(intent)
-    }
   }
 }
 

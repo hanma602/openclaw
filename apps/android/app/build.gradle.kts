@@ -63,7 +63,7 @@ android {
 
     defaultConfig {
         applicationId = "ai.openclaw.app"
-        minSdk = 31
+        minSdk = 30
         targetSdk = 36
         versionCode = 2026032200
         versionName = "2026.3.22"
@@ -221,7 +221,9 @@ dependencies {
     implementation("androidx.camera:camera-camera2:1.5.2")
     implementation("androidx.camera:camera-lifecycle:1.5.2")
     implementation("androidx.camera:camera-video:1.5.2")
-    implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
+    // ML Kit Barcode Scanning (standalone, no GMS required)
+    implementation("com.google.mlkit:barcode-scanning:17.3.0")
+    implementation("androidx.camera:camera-view:1.5.2")
 
     // Unicast DNS-SD (Wide-Area Bonjour) for tailnet discovery domains.
     implementation("dnsjava:dnsjava:3.6.4")

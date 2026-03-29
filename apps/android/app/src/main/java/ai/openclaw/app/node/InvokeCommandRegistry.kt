@@ -1,5 +1,6 @@
 package ai.openclaw.app.node
 
+import ai.openclaw.app.protocol.OpenClawAppCommand
 import ai.openclaw.app.protocol.OpenClawCalendarCommand
 import ai.openclaw.app.protocol.OpenClawCanvasA2UICommand
 import ai.openclaw.app.protocol.OpenClawCanvasCommand
@@ -93,6 +94,10 @@ object InvokeCommandRegistry {
       NodeCapabilitySpec(
         name = OpenClawCapability.CallLog.rawValue,
         availability = NodeCapabilityAvailability.CallLogAvailable,
+      ),
+      NodeCapabilitySpec(
+        name = OpenClawCapability.AppLauncher.rawValue,
+        availability = NodeCapabilityAvailability.Always,
       ),
     )
 
@@ -212,6 +217,19 @@ object InvokeCommandRegistry {
       InvokeCommandSpec(
         name = "debug.ed25519",
         availability = InvokeCommandAvailability.DebugBuild,
+      ),
+      // App Launcher commands
+      InvokeCommandSpec(
+        name = OpenClawAppCommand.LaunchBilibili.rawValue,
+        requiresForeground = false,
+      ),
+      InvokeCommandSpec(
+        name = OpenClawAppCommand.OpenFavorites.rawValue,
+        requiresForeground = false,
+      ),
+      InvokeCommandSpec(
+        name = OpenClawAppCommand.Launch.rawValue,
+        requiresForeground = false,
       ),
     )
 

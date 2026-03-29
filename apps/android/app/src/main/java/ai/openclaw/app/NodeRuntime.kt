@@ -43,6 +43,8 @@ import kotlinx.serialization.json.buildJsonObject
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
 
+private const val TAG = "NodeRuntime"
+
 class NodeRuntime(
   context: Context,
   val prefs: SecurePrefs = SecurePrefs(context.applicationContext),
@@ -50,6 +52,10 @@ class NodeRuntime(
   private val appContext = context.applicationContext
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
   private val deviceAuthStore = DeviceAuthStore(prefs)
+  
+  init {
+    Log.i(TAG, "NodeRuntime initialized")
+  }
   val canvas = CanvasController()
   val camera = CameraCaptureManager(appContext)
   val location = LocationCaptureManager(appContext)
@@ -125,6 +131,10 @@ class NodeRuntime(
     sms = sms,
   )
 
+  private val appLauncherHandler: AppLauncherHandler = AppLauncherHandler(
+    context = appContext,
+  )
+
   private val a2uiHandler: A2UIHandler = A2UIHandler(
     canvas = canvas,
     json = json,
@@ -161,6 +171,7 @@ class NodeRuntime(
     a2uiHandler = a2uiHandler,
     debugHandler = debugHandler,
     callLogHandler = callLogHandler,
+    appLauncherHandler = appLauncherHandler,
     isForeground = { _isForeground.value },
     cameraEnabled = { cameraEnabled.value },
     locationEnabled = { locationMode.value != LocationMode.Off },
@@ -238,6 +249,7 @@ class NodeRuntime(
       identityStore = identityStore,
       deviceAuthStore = deviceAuthStore,
       onConnected = { name, remote, mainSessionKey ->
+        Log.i(TAG, "Operator connected: name=$name, remote=$remote, sessionKey=$mainSessionKey")
         operatorConnected = true
         operatorStatusText = "Connected"
         _serverName.value = name
@@ -254,6 +266,7 @@ class NodeRuntime(
         }
       },
       onDisconnected = { message ->
+        Log.w(TAG, "Operator disconnected: $message")
         operatorConnected = false
         operatorStatusText = message
         _serverName.value = null
@@ -268,6 +281,7 @@ class NodeRuntime(
         micCapture.onGatewayConnectionChanged(false)
       },
       onEvent = { event, payloadJson ->
+        Log.d(TAG, "Operator event received: $event")
         handleGatewayEvent(event, payloadJson)
       },
     )
@@ -278,6 +292,7 @@ class NodeRuntime(
       identityStore = identityStore,
       deviceAuthStore = deviceAuthStore,
       onConnected = { _, _, _ ->
+        Log.i(TAG, "Node connected")
         _nodeConnected.value = true
         nodeStatusText = "Connected"
         didAutoRequestCanvasRehydrate = false
@@ -288,6 +303,7 @@ class NodeRuntime(
         showLocalCanvasOnConnect()
       },
       onDisconnected = { message ->
+        Log.w(TAG, "Node disconnected: $message")
         _nodeConnected.value = false
         nodeStatusText = message
         didAutoRequestCanvasRehydrate = false
@@ -299,9 +315,11 @@ class NodeRuntime(
       },
       onEvent = { _, _ -> },
       onInvoke = { req ->
+        Log.d(TAG, "Node invoke received: ${req.command}")
         invokeDispatcher.handleInvoke(req.command, req.paramsJson)
       },
       onTlsFingerprint = { stableId, fingerprint ->
+        Log.i(TAG, "Storing TLS fingerprint for stableId: $stableId")
         prefs.saveGatewayTlsFingerprint(stableId, fingerprint)
       },
     )
@@ -431,6 +449,7 @@ class NodeRuntime(
         operator.isNotBlank() && operator != "Offline" -> operator
         else -> node
       }
+    Log.d(TAG, "Status updated: isConnected=$_isConnected.value, status='${_statusText.value}'")
     updateHomeCanvasState()
   }
 
@@ -465,13 +484,18 @@ class NodeRuntime(
   }
 
   fun requestCanvasRehydrate(source: String = "manual", force: Boolean = true) {
+    Log.i(TAG, "Canvas rehydrate requested: source=$source, force=$force")
     scope.launch {
       if (!_nodeConnected.value) {
+        Log.w(TAG, "Node offline - cannot rehydrate canvas")
         _canvasRehydratePending.value = false
         _canvasRehydrateErrorText.value = "Node offline. Reconnect and retry."
         return@launch
       }
-      if (!force && didAutoRequestCanvasRehydrate) return@launch
+      if (!force && didAutoRequestCanvasRehydrate) {
+        Log.d(TAG, "Skipping auto rehydrate - already requested")
+        return@launch
+      }
       didAutoRequestCanvasRehydrate = true
       val requestId = canvasRehydrateSeq.incrementAndGet()
       _canvasRehydratePending.value = true
@@ -504,11 +528,13 @@ class NodeRuntime(
         Log.w("OpenClawCanvas", "canvas rehydrate request failed ($source): transport unavailable")
         return@launch
       }
+      Log.i(TAG, "Canvas rehydrate request sent successfully")
       scope.launch {
         delay(20_000)
         if (canvasRehydrateSeq.get() != requestId) return@launch
         if (!_canvasRehydratePending.value) return@launch
         if (_canvasA2uiHydrated.value) return@launch
+        Log.w(TAG, "Canvas rehydrate timeout after 20s")
         _canvasRehydratePending.value = false
         _canvasRehydrateErrorText.value = "No canvas update yet. Tap to retry."
       }
@@ -527,10 +553,18 @@ class NodeRuntime(
   val manualTls: StateFlow<Boolean> = prefs.manualTls
   val gatewayToken: StateFlow<String> = prefs.gatewayToken
   val onboardingCompleted: StateFlow<Boolean> = prefs.onboardingCompleted
-  fun setGatewayToken(value: String) = prefs.setGatewayToken(value)
-  fun setGatewayBootstrapToken(value: String) = prefs.setGatewayBootstrapToken(value)
-  fun setGatewayPassword(value: String) = prefs.setGatewayPassword(value)
-  fun setOnboardingCompleted(value: Boolean) = prefs.setOnboardingCompleted(value)
+  fun setGatewayToken(value: String) = prefs.setGatewayToken(value).also { 
+    Log.d(TAG, "Gateway token set, length=${value.length}")
+  }
+  fun setGatewayBootstrapToken(value: String) = prefs.setGatewayBootstrapToken(value).also {
+    Log.d(TAG, "Gateway bootstrap token set, length=${value.length}")
+  }
+  fun setGatewayPassword(value: String) = prefs.setGatewayPassword(value).also {
+    Log.d(TAG, "Gateway password set, length=${value.length}")
+  }
+  fun setOnboardingCompleted(value: Boolean) = prefs.setOnboardingCompleted(value).also {
+    Log.i(TAG, "Onboarding completed: $value")
+  }
   val lastDiscoveredStableId: StateFlow<String> = prefs.lastDiscoveredStableId
   val canvasDebugStatusEnabled: StateFlow<Boolean> = prefs.canvasDebugStatusEnabled
 
@@ -597,10 +631,12 @@ class NodeRuntime(
   }
 
   fun setForeground(value: Boolean) {
+    Log.d(TAG, "Foreground state changed: $value")
     _isForeground.value = value
     if (value) {
       reconnectPreferredGatewayOnForeground()
     } else {
+      Log.i(TAG, "Backgrounded - stopping active voice session")
       stopActiveVoiceSession()
     }
   }
@@ -631,18 +667,30 @@ class NodeRuntime(
     if (didAutoConnect) return
     if (_isConnected.value) return
     val endpoint = resolvePreferredGatewayEndpoint() ?: return
+    Log.i(TAG, "Auto-connecting to preferred gateway: ${endpoint.host}:${endpoint.port}")
     didAutoConnect = true
     connect(endpoint)
   }
 
   private fun reconnectPreferredGatewayOnForeground() {
-    if (_isConnected.value) return
-    if (_pendingGatewayTrust.value != null) return
+    Log.d(TAG, "Reconnect on foreground called")
+    if (_isConnected.value) {
+      Log.d(TAG, "Already connected, skipping foreground reconnect")
+      return
+    }
+    if (_pendingGatewayTrust.value != null) {
+      Log.d(TAG, "Pending trust prompt, skipping foreground reconnect")
+      return
+    }
     if (connectedEndpoint != null) {
+      Log.i(TAG, "Has cached endpoint - refreshing connection")
       refreshGatewayConnection()
       return
     }
-    resolvePreferredGatewayEndpoint()?.let(::connect)
+    resolvePreferredGatewayEndpoint()?.let { endpoint ->
+      Log.i(TAG, "Connecting to preferred endpoint on foreground: ${endpoint.host}:${endpoint.port}")
+      connect(endpoint)
+    } ?: Log.d(TAG, "No preferred endpoint available for foreground reconnect")
   }
 
   fun setDisplayName(value: String) {
@@ -650,38 +698,47 @@ class NodeRuntime(
   }
 
   fun setCameraEnabled(value: Boolean) {
+    Log.i(TAG, "Camera enabled: $value")
     prefs.setCameraEnabled(value)
   }
 
   fun setLocationMode(mode: LocationMode) {
+    Log.i(TAG, "Location mode set: $mode")
     prefs.setLocationMode(mode)
   }
 
   fun setLocationPreciseEnabled(value: Boolean) {
+    Log.i(TAG, "Location precise mode: $value")
     prefs.setLocationPreciseEnabled(value)
   }
 
   fun setPreventSleep(value: Boolean) {
+    Log.d(TAG, "Prevent sleep: $value")
     prefs.setPreventSleep(value)
   }
 
   fun setManualEnabled(value: Boolean) {
+    Log.i(TAG, "Manual gateway enabled: $value")
     prefs.setManualEnabled(value)
   }
 
   fun setManualHost(value: String) {
+    Log.i(TAG, "Manual host set: $value")
     prefs.setManualHost(value)
   }
 
   fun setManualPort(value: Int) {
+    Log.i(TAG, "Manual port set: $value")
     prefs.setManualPort(value)
   }
 
   fun setManualTls(value: Boolean) {
+    Log.i(TAG, "Manual TLS: $value")
     prefs.setManualTls(value)
   }
 
   fun setCanvasDebugStatusEnabled(value: Boolean) {
+    Log.d(TAG, "Canvas debug status enabled: $value")
     prefs.setCanvasDebugStatusEnabled(value)
   }
 
@@ -693,9 +750,11 @@ class NodeRuntime(
   }
 
   fun setMicEnabled(value: Boolean) {
+    Log.i(TAG, "Mic enabled: $value")
     prefs.setTalkEnabled(value)
     if (value) {
       // Tapping mic on interrupts any active TTS (barge-in)
+      Log.d(TAG, "Mic on - interrupting TTS and enabling chat subscription")
       talkMode.stopTts()
       talkMode.ttsOnAllResponses = true
       scope.launch { talkMode.ensureChatSubscribed() }
@@ -708,6 +767,7 @@ class NodeRuntime(
     get() = prefs.speakerEnabled
 
   fun setSpeakerEnabled(value: Boolean) {
+    Log.i(TAG, "Speaker enabled: $value")
     prefs.setSpeakerEnabled(value)
     if (voiceReplySpeakerLazy.isInitialized()) {
       voiceReplySpeaker.setPlaybackEnabled(value)
@@ -717,6 +777,7 @@ class NodeRuntime(
   }
 
   private fun stopActiveVoiceSession() {
+    Log.i(TAG, "Stopping active voice session")
     talkMode.ttsOnAllResponses = false
     talkMode.stopTts()
     micCapture.setMicEnabled(false)
@@ -725,8 +786,10 @@ class NodeRuntime(
   }
 
   fun refreshGatewayConnection() {
+    Log.i(TAG, "Refreshing gateway connection")
     val endpoint =
       connectedEndpoint ?: run {
+        Log.e(TAG, "Refresh failed: no cached gateway endpoint")
         _statusText.value = "Failed: no cached gateway endpoint"
         return
       }
@@ -736,6 +799,7 @@ class NodeRuntime(
     val bootstrapToken = prefs.loadGatewayBootstrapToken()
     val password = prefs.loadGatewayPassword()
     val tls = connectionManager.resolveTlsParams(endpoint)
+    Log.i(TAG, "Reconnecting to ${endpoint.host}:${endpoint.port} with TLS=${tls?.required}")
     operatorSession.connect(
       endpoint,
       token,
@@ -757,15 +821,19 @@ class NodeRuntime(
   }
 
   fun connect(endpoint: GatewayEndpoint) {
+    Log.i(TAG, "Connect called to endpoint: ${endpoint.host}:${endpoint.port}")
     val tls = connectionManager.resolveTlsParams(endpoint)
     if (tls?.required == true && tls.expectedFingerprint.isNullOrBlank()) {
       // First-time TLS: capture fingerprint, ask user to verify out-of-band, then store and connect.
+      Log.w(TAG, "TLS required but no fingerprint stored - prompting for trust")
       _statusText.value = "Verify gateway TLS fingerprint…"
       scope.launch {
         val fp = probeGatewayTlsFingerprint(endpoint.host, endpoint.port) ?: run {
+          Log.e(TAG, "Failed to read TLS fingerprint from ${endpoint.host}:${endpoint.port}")
           _statusText.value = "Failed: can't read TLS fingerprint"
           return@launch
         }
+        Log.i(TAG, "Captured TLS fingerprint: ${fp.take(16)}...")
         _pendingGatewayTrust.value = GatewayTrustPrompt(endpoint = endpoint, fingerprintSha256 = fp)
       }
       return
@@ -778,6 +846,7 @@ class NodeRuntime(
     val token = prefs.loadGatewayToken()
     val bootstrapToken = prefs.loadGatewayBootstrapToken()
     val password = prefs.loadGatewayPassword()
+    Log.i(TAG, "Establishing operator and node sessions with token length=${token?.length ?: 0}, bootstrap length=${bootstrapToken?.length ?: 0}")
     operatorSession.connect(
       endpoint,
       token,
@@ -798,12 +867,14 @@ class NodeRuntime(
 
   fun acceptGatewayTrustPrompt() {
     val prompt = _pendingGatewayTrust.value ?: return
+    Log.i(TAG, "User accepted gateway trust prompt for endpoint: ${prompt.endpoint.host}:${prompt.endpoint.port}")
     _pendingGatewayTrust.value = null
     prefs.saveGatewayTlsFingerprint(prompt.endpoint.stableId, prompt.fingerprintSha256)
     connect(prompt.endpoint)
   }
 
   fun declineGatewayTrustPrompt() {
+    Log.w(TAG, "User declined gateway trust prompt")
     _pendingGatewayTrust.value = null
     _statusText.value = "Offline"
   }
@@ -826,6 +897,7 @@ class NodeRuntime(
   }
 
   fun disconnect() {
+    Log.i(TAG, "Disconnecting from gateway")
     connectedEndpoint = null
     _pendingGatewayTrust.value = null
     operatorSession.disconnect()
@@ -833,14 +905,19 @@ class NodeRuntime(
   }
 
   fun handleCanvasA2UIActionFromWebView(payloadJson: String) {
+    Log.d(TAG, "handleCanvasA2UIActionFromWebView called, payload length=${payloadJson.length}")
     scope.launch {
       val trimmed = payloadJson.trim()
-      if (trimmed.isEmpty()) return@launch
+      if (trimmed.isEmpty()) {
+        Log.w(TAG, "Empty payload in handleCanvasA2UIActionFromWebView")
+        return@launch
+      }
 
       val root =
         try {
           json.parseToJsonElement(trimmed).asObjectOrNull() ?: return@launch
-        } catch (_: Throwable) {
+        } catch (e: Throwable) {
+          Log.e(TAG, "Failed to parse payload JSON: ${e.message}")
           return@launch
         }
 
@@ -848,7 +925,10 @@ class NodeRuntime(
       val actionId = (userActionObj["id"] as? JsonPrimitive)?.content?.trim().orEmpty().ifEmpty {
         java.util.UUID.randomUUID().toString()
       }
-      val name = OpenClawCanvasA2UIAction.extractActionName(userActionObj) ?: return@launch
+      val name = OpenClawCanvasA2UIAction.extractActionName(userActionObj) ?: run {
+        Log.w(TAG, "Failed to extract action name from payload")
+        return@launch
+      }
 
       val surfaceId =
         (userActionObj["surfaceId"] as? JsonPrimitive)?.content?.trim().orEmpty().ifEmpty { "main" }
@@ -871,6 +951,7 @@ class NodeRuntime(
       val connected = _nodeConnected.value
       var error: String? = null
       if (connected) {
+        Log.i(TAG, "Sending canvas action to node: action=$name, actionId=$actionId")
         val sent =
           nodeSession.sendNodeEvent(
             event = "agent.request",
@@ -885,9 +966,11 @@ class NodeRuntime(
           )
         if (!sent) {
           error = "send failed"
+          Log.e(TAG, "Failed to send canvas action to node")
         }
       } else {
         error = "gateway not connected"
+        Log.w(TAG, "Cannot send canvas action - gateway not connected")
       }
 
       try {
@@ -898,7 +981,8 @@ class NodeRuntime(
             error = error,
           ),
         )
-      } catch (_: Throwable) {
+      } catch (e: Throwable) {
+        Log.e(TAG, "Failed to dispatch A2UI action status: ${e.message}")
         // ignore
       }
     }

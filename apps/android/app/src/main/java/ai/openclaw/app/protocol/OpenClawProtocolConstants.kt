@@ -14,6 +14,12 @@ enum class OpenClawCapability(val rawValue: String) {
   Calendar("calendar"),
   Motion("motion"),
   CallLog("callLog"),
+  AppLauncher("appLauncher"),
+  ;
+  
+  companion object {
+    fun allCapabilities(): List<OpenClawCapability> = entries.toList()
+  }
 }
 
 enum class OpenClawCanvasCommand(val rawValue: String) {
@@ -146,5 +152,16 @@ enum class OpenClawCallLogCommand(val rawValue: String) {
 
   companion object {
     const val NamespacePrefix: String = "callLog."
+  }
+}
+
+enum class OpenClawAppCommand(val rawValue: String) {
+  Launch("app.launch"),
+  LaunchBilibili("app.launch.bilibili"),
+  OpenFavorites("app.open.favorites"),
+  ;
+
+  companion object {
+    const val NamespacePrefix: String = "app."
   }
 }

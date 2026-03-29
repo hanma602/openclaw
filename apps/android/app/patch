@@ -1,0 +1,1431 @@
+diff --git a/apps/android/app/build.gradle.kts b/apps/android/app/build.gradle.kts
+index 603669f92c..cce54288da 100644
+--- a/apps/android/app/build.gradle.kts
++++ b/apps/android/app/build.gradle.kts
+@@ -63,7 +63,7 @@ android {
+ 
+     defaultConfig {
+         applicationId = "ai.openclaw.app"
+-        minSdk = 31
++        minSdk = 30
+         targetSdk = 36
+         versionCode = 2026032200
+         versionName = "2026.3.22"
+@@ -221,7 +221,9 @@ dependencies {
+     implementation("androidx.camera:camera-camera2:1.5.2")
+     implementation("androidx.camera:camera-lifecycle:1.5.2")
+     implementation("androidx.camera:camera-video:1.5.2")
+-    implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
++    // ML Kit Barcode Scanning (standalone, no GMS required)
++    implementation("com.google.mlkit:barcode-scanning:17.3.0")
++    implementation("androidx.camera:camera-view:1.5.2")
+ 
+     // Unicast DNS-SD (Wide-Area Bonjour) for tailnet discovery domains.
+     implementation("dnsjava:dnsjava:3.6.4")
+diff --git a/apps/android/app/src/main/AndroidManifest.xml b/apps/android/app/src/main/AndroidManifest.xml
+index 283daae601..e493bbb39c 100644
+--- a/apps/android/app/src/main/AndroidManifest.xml
++++ b/apps/android/app/src/main/AndroidManifest.xml
+@@ -74,5 +74,10 @@
+                 <category android:name="android.intent.category.LAUNCHER" />
+             </intent-filter>
+         </activity>
++        <activity
++            android:name=".ui.QrScannerActivity"
++            android:exported="false"
++            android:theme="@style/Theme.AppCompat.NoActionBar"
++            android:screenOrientation="portrait" />
+     </application>
+ </manifest>
+diff --git a/apps/android/app/src/main/java/ai/openclaw/app/MainActivity.kt b/apps/android/app/src/main/java/ai/openclaw/app/MainActivity.kt
+index d9ad83175b..7e0cb5ae69 100644
+--- a/apps/android/app/src/main/java/ai/openclaw/app/MainActivity.kt
++++ b/apps/android/app/src/main/java/ai/openclaw/app/MainActivity.kt
+@@ -1,6 +1,7 @@
+ package ai.openclaw.app
+ 
+ import android.os.Bundle
++import android.util.Log
+ import android.view.WindowManager
+ import androidx.activity.ComponentActivity
+ import androidx.activity.compose.setContent
+@@ -15,6 +16,8 @@ import ai.openclaw.app.ui.RootScreen
+ import ai.openclaw.app.ui.OpenClawTheme
+ import kotlinx.coroutines.launch
+ 
++private const val TAG = "MainActivity"
++
+ class MainActivity : ComponentActivity() {
+   private val viewModel: MainViewModel by viewModels()
+   private lateinit var permissionRequester: PermissionRequester
+@@ -22,13 +25,16 @@ class MainActivity : ComponentActivity() {
+   private var didStartNodeService = false
+ 
+   override fun onCreate(savedInstanceState: Bundle?) {
++    Log.i(TAG, "MainActivity onCreate called")
+     super.onCreate(savedInstanceState)
++    Log.d(TAG, "Setting up window and permission requester")
+     WindowCompat.setDecorFitsSystemWindows(window, false)
+     permissionRequester = PermissionRequester(this)
+ 
+     lifecycleScope.launch {
+       repeatOnLifecycle(Lifecycle.State.STARTED) {
+         viewModel.preventSleep.collect { enabled ->
++          Log.d(TAG, "Prevent sleep mode changed: $enabled")
+           if (enabled) {
+             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+           } else {
+@@ -42,31 +48,37 @@ class MainActivity : ComponentActivity() {
+       repeatOnLifecycle(Lifecycle.State.STARTED) {
+         viewModel.runtimeInitialized.collect { ready ->
+           if (!ready || didAttachRuntimeUi) return@collect
++          Log.i(TAG, "Runtime initialized - attaching UI and starting node service")
+           viewModel.attachRuntimeUi(owner = this@MainActivity, permissionRequester = permissionRequester)
+           didAttachRuntimeUi = true
+           if (!didStartNodeService) {
+             NodeForegroundService.start(this@MainActivity)
+             didStartNodeService = true
++            Log.i(TAG, "NodeForegroundService started")
+           }
+         }
+       }
+     }
+ 
+     setContent {
++      Log.d(TAG, "Composing app content with OpenClawTheme")
+       OpenClawTheme {
+         Surface(modifier = Modifier) {
+           RootScreen(viewModel = viewModel)
+         }
+       }
+     }
++    Log.i(TAG, "MainActivity setup completed")
+   }
+ 
+   override fun onStart() {
+     super.onStart()
++    Log.d(TAG, "MainActivity onStart - setting foreground")
+     viewModel.setForeground(true)
+   }
+ 
+   override fun onStop() {
++    Log.d(TAG, "MainActivity onStop - setting background")
+     viewModel.setForeground(false)
+     super.onStop()
+   }
+diff --git a/apps/android/app/src/main/java/ai/openclaw/app/MainViewModel.kt b/apps/android/app/src/main/java/ai/openclaw/app/MainViewModel.kt
+index 38d81d4f8d..1017bd4c7a 100644
+--- a/apps/android/app/src/main/java/ai/openclaw/app/MainViewModel.kt
++++ b/apps/android/app/src/main/java/ai/openclaw/app/MainViewModel.kt
+@@ -1,6 +1,7 @@
+ package ai.openclaw.app
+ 
+ import android.app.Application
++import android.util.Log
+ import androidx.lifecycle.AndroidViewModel
+ import androidx.lifecycle.LifecycleOwner
+ import androidx.lifecycle.viewModelScope
+@@ -23,16 +24,23 @@ import kotlinx.coroutines.flow.stateIn
+ 
+ @OptIn(ExperimentalCoroutinesApi::class)
+ class MainViewModel(app: Application) : AndroidViewModel(app) {
++  private val TAG = "MainViewModel"
+   private val nodeApp = app as NodeApp
+   private val prefs = nodeApp.prefs
+   private val runtimeRef = MutableStateFlow<NodeRuntime?>(null)
+   private var foreground = true
+ 
++  init {
++    Log.i(TAG, "MainViewModel initialized")
++  }
++
+   private fun ensureRuntime(): NodeRuntime {
+     runtimeRef.value?.let { return it }
++    Log.d(TAG, "ensureRuntime - creating new instance")
+     val runtime = nodeApp.ensureRuntime()
+     runtime.setForeground(foreground)
+     runtimeRef.value = runtime
++    Log.i(TAG, "ensureRuntime - created new NodeRuntime instance")
+     return runtime
+   }
+ 
+@@ -106,8 +114,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
+   val pendingRunCount: StateFlow<Int> = runtimeState(initial = 0) { it.pendingRunCount }
+ 
+   init {
++    Log.d(TAG, "MainViewModel init - onboardingCompleted=${prefs.onboardingCompleted.value}")
+     if (prefs.onboardingCompleted.value) {
++      Log.i(TAG, "Onboarding already completed - ensuring runtime")
+       ensureRuntime()
++    } else {
++      Log.d(TAG, "Onboarding not completed yet")
+     }
+   }
+ 
+@@ -121,16 +133,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
+     get() = ensureRuntime().sms
+ 
+   fun attachRuntimeUi(owner: LifecycleOwner, permissionRequester: PermissionRequester) {
+-    val runtime = runtimeRef.value ?: return
++    Log.i(TAG, "attachRuntimeUi called")
++    val runtime = runtimeRef.value ?: run {
++      Log.w(TAG, "attachRuntimeUi - runtime not available")
++      return
++    }
++    Log.d(TAG, "Attaching lifecycle owner and permission requester to camera and sms")
+     runtime.camera.attachLifecycleOwner(owner)
+     runtime.camera.attachPermissionRequester(permissionRequester)
+     runtime.sms.attachPermissionRequester(permissionRequester)
++    Log.i(TAG, "attachRuntimeUi completed successfully")
+   }
+ 
+   fun setForeground(value: Boolean) {
++    Log.d(TAG, "setForeground: $value")
+     foreground = value
+     val runtime =
+       if (value && prefs.onboardingCompleted.value) {
++        Log.d(TAG, "Ensuring runtime for foreground mode")
+         ensureRuntime()
+       } else {
+         runtimeRef.value
+@@ -187,7 +207,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
+   }
+ 
+   fun setOnboardingCompleted(value: Boolean) {
++    Log.i(TAG, "setOnboardingCompleted: $value")
+     if (value) {
++      Log.d(TAG, "Onboarding completed - ensuring runtime")
+       ensureRuntime()
+     }
+     prefs.setOnboardingCompleted(value)
+diff --git a/apps/android/app/src/main/java/ai/openclaw/app/NodeForegroundService.kt b/apps/android/app/src/main/java/ai/openclaw/app/NodeForegroundService.kt
+index 4c7ccdd56e..cd4387c589 100644
+--- a/apps/android/app/src/main/java/ai/openclaw/app/NodeForegroundService.kt
++++ b/apps/android/app/src/main/java/ai/openclaw/app/NodeForegroundService.kt
+@@ -8,6 +8,7 @@ import android.app.PendingIntent
+ import android.content.Context
+ import android.content.Intent
+ import android.content.pm.ServiceInfo
++import android.util.Log
+ import androidx.core.app.NotificationCompat
+ import kotlinx.coroutines.CoroutineScope
+ import kotlinx.coroutines.Dispatchers
+@@ -18,21 +19,45 @@ import kotlinx.coroutines.flow.combine
+ import kotlinx.coroutines.launch
+ 
+ class NodeForegroundService : Service() {
++  companion object {
++    private const val TAG = "NodeForegroundService"
++    private const val CHANNEL_ID = "connection"
++    private const val NOTIFICATION_ID = 1
++
++    private const val ACTION_STOP = "ai.openclaw.app.action.STOP"
++
++    fun start(context: Context) {
++      Log.i(TAG, "start() called")
++      val intent = Intent(context, NodeForegroundService::class.java)
++      context.startForegroundService(intent)
++    }
++
++    fun stop(context: Context) {
++      Log.i(TAG, "stop() called")
++      val intent = Intent(context, NodeForegroundService::class.java).setAction(ACTION_STOP)
++      context.startService(intent)
++    }
++  }
++  
+   private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+   private var notificationJob: Job? = null
+   private var didStartForeground = false
+ 
+   override fun onCreate() {
+     super.onCreate()
++    Log.i(TAG, "onCreate() called")
+     ensureChannel()
+     val initial = buildNotification(title = "OpenClaw Node", text = "Starting…")
++    Log.d(TAG, "Starting foreground service with initial notification")
+     startForegroundWithTypes(notification = initial)
+ 
+     val runtime = (application as NodeApp).peekRuntime()
+     if (runtime == null) {
++      Log.w(TAG, "No runtime available - stopping service")
+       stopSelf()
+       return
+     }
++    Log.i(TAG, "Starting notification update loop")
+     notificationJob =
+       scope.launch {
+         combine(
+@@ -44,6 +69,7 @@ class NodeForegroundService : Service() {
+         ) { status, server, connected, micEnabled, micListening ->
+           Quint(status, server, connected, micEnabled, micListening)
+         }.collect { (status, server, connected, micEnabled, micListening) ->
++          Log.d(TAG, "Notification update: title=${if (connected) "Connected" else "Node"}, status=$status")
+           val title = if (connected) "OpenClaw Node · Connected" else "OpenClaw Node"
+           val micSuffix =
+             if (micEnabled) {
+@@ -61,8 +87,10 @@ class NodeForegroundService : Service() {
+   }
+ 
+   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
++    Log.d(TAG, "onStartCommand() action=${intent?.action}, startId=$startId")
+     when (intent?.action) {
+       ACTION_STOP -> {
++        Log.i(TAG, "Stop action received - disconnecting and stopping")
+         (application as NodeApp).peekRuntime()?.disconnect()
+         stopSelf()
+         return START_NOT_STICKY
+@@ -73,6 +101,7 @@ class NodeForegroundService : Service() {
+   }
+ 
+   override fun onDestroy() {
++    Log.i(TAG, "onDestroy() called")
+     notificationJob?.cancel()
+     scope.cancel()
+     super.onDestroy()
+@@ -81,6 +110,7 @@ class NodeForegroundService : Service() {
+   override fun onBind(intent: Intent?) = null
+ 
+   private fun ensureChannel() {
++    Log.d(TAG, "Creating notification channel")
+     val mgr = getSystemService(NotificationManager::class.java)
+     val channel =
+       NotificationChannel(
+@@ -95,6 +125,7 @@ class NodeForegroundService : Service() {
+   }
+ 
+   private fun buildNotification(title: String, text: String): Notification {
++    Log.d(TAG, "Building notification: title=$title")
+     val launchIntent = Intent(this, MainActivity::class.java).apply {
+       flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+     }
+@@ -140,23 +171,6 @@ class NodeForegroundService : Service() {
+     startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+     didStartForeground = true
+   }
+-
+-  companion object {
+-    private const val CHANNEL_ID = "connection"
+-    private const val NOTIFICATION_ID = 1
+-
+-    private const val ACTION_STOP = "ai.openclaw.app.action.STOP"
+-
+-    fun start(context: Context) {
+-      val intent = Intent(context, NodeForegroundService::class.java)
+-      context.startForegroundService(intent)
+-    }
+-
+-    fun stop(context: Context) {
+-      val intent = Intent(context, NodeForegroundService::class.java).setAction(ACTION_STOP)
+-      context.startService(intent)
+-    }
+-  }
+ }
+ 
+ private data class Quint<A, B, C, D, E>(val first: A, val second: B, val third: C, val fourth: D, val fifth: E)
+diff --git a/apps/android/app/src/main/java/ai/openclaw/app/NodeRuntime.kt b/apps/android/app/src/main/java/ai/openclaw/app/NodeRuntime.kt
+index 09bab5f3ea..3a467fe75a 100644
+--- a/apps/android/app/src/main/java/ai/openclaw/app/NodeRuntime.kt
++++ b/apps/android/app/src/main/java/ai/openclaw/app/NodeRuntime.kt
+@@ -43,6 +43,8 @@ import kotlinx.serialization.json.buildJsonObject
+ import java.util.UUID
+ import java.util.concurrent.atomic.AtomicLong
+ 
++private const val TAG = "NodeRuntime"
++
+ class NodeRuntime(
+   context: Context,
+   val prefs: SecurePrefs = SecurePrefs(context.applicationContext),
+@@ -50,6 +52,10 @@ class NodeRuntime(
+   private val appContext = context.applicationContext
+   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+   private val deviceAuthStore = DeviceAuthStore(prefs)
++  
++  init {
++    Log.i(TAG, "NodeRuntime initialized")
++  }
+   val canvas = CanvasController()
+   val camera = CameraCaptureManager(appContext)
+   val location = LocationCaptureManager(appContext)
+@@ -125,6 +131,10 @@ class NodeRuntime(
+     sms = sms,
+   )
+ 
++  private val appLauncherHandler: AppLauncherHandler = AppLauncherHandler(
++    context = appContext,
++  )
++
+   private val a2uiHandler: A2UIHandler = A2UIHandler(
+     canvas = canvas,
+     json = json,
+@@ -161,6 +171,7 @@ class NodeRuntime(
+     a2uiHandler = a2uiHandler,
+     debugHandler = debugHandler,
+     callLogHandler = callLogHandler,
++    appLauncherHandler = appLauncherHandler,
+     isForeground = { _isForeground.value },
+     cameraEnabled = { cameraEnabled.value },
+     locationEnabled = { locationMode.value != LocationMode.Off },
+@@ -238,6 +249,7 @@ class NodeRuntime(
+       identityStore = identityStore,
+       deviceAuthStore = deviceAuthStore,
+       onConnected = { name, remote, mainSessionKey ->
++        Log.i(TAG, "Operator connected: name=$name, remote=$remote, sessionKey=$mainSessionKey")
+         operatorConnected = true
+         operatorStatusText = "Connected"
+         _serverName.value = name
+@@ -254,6 +266,7 @@ class NodeRuntime(
+         }
+       },
+       onDisconnected = { message ->
++        Log.w(TAG, "Operator disconnected: $message")
+         operatorConnected = false
+         operatorStatusText = message
+         _serverName.value = null
+@@ -268,6 +281,7 @@ class NodeRuntime(
+         micCapture.onGatewayConnectionChanged(false)
+       },
+       onEvent = { event, payloadJson ->
++        Log.d(TAG, "Operator event received: $event")
+         handleGatewayEvent(event, payloadJson)
+       },
+     )
+@@ -278,6 +292,7 @@ class NodeRuntime(
+       identityStore = identityStore,
+       deviceAuthStore = deviceAuthStore,
+       onConnected = { _, _, _ ->
++        Log.i(TAG, "Node connected")
+         _nodeConnected.value = true
+         nodeStatusText = "Connected"
+         didAutoRequestCanvasRehydrate = false
+@@ -288,6 +303,7 @@ class NodeRuntime(
+         showLocalCanvasOnConnect()
+       },
+       onDisconnected = { message ->
++        Log.w(TAG, "Node disconnected: $message")
+         _nodeConnected.value = false
+         nodeStatusText = message
+         didAutoRequestCanvasRehydrate = false
+@@ -299,9 +315,11 @@ class NodeRuntime(
+       },
+       onEvent = { _, _ -> },
+       onInvoke = { req ->
++        Log.d(TAG, "Node invoke received: ${req.command}")
+         invokeDispatcher.handleInvoke(req.command, req.paramsJson)
+       },
+       onTlsFingerprint = { stableId, fingerprint ->
++        Log.i(TAG, "Storing TLS fingerprint for stableId: $stableId")
+         prefs.saveGatewayTlsFingerprint(stableId, fingerprint)
+       },
+     )
+@@ -431,6 +449,7 @@ class NodeRuntime(
+         operator.isNotBlank() && operator != "Offline" -> operator
+         else -> node
+       }
++    Log.d(TAG, "Status updated: isConnected=$_isConnected.value, status='${_statusText.value}'")
+     updateHomeCanvasState()
+   }
+ 
+@@ -465,13 +484,18 @@ class NodeRuntime(
+   }
+ 
+   fun requestCanvasRehydrate(source: String = "manual", force: Boolean = true) {
++    Log.i(TAG, "Canvas rehydrate requested: source=$source, force=$force")
+     scope.launch {
+       if (!_nodeConnected.value) {
++        Log.w(TAG, "Node offline - cannot rehydrate canvas")
+         _canvasRehydratePending.value = false
+         _canvasRehydrateErrorText.value = "Node offline. Reconnect and retry."
+         return@launch
+       }
+-      if (!force && didAutoRequestCanvasRehydrate) return@launch
++      if (!force && didAutoRequestCanvasRehydrate) {
++        Log.d(TAG, "Skipping auto rehydrate - already requested")
++        return@launch
++      }
+       didAutoRequestCanvasRehydrate = true
+       val requestId = canvasRehydrateSeq.incrementAndGet()
+       _canvasRehydratePending.value = true
+@@ -504,11 +528,13 @@ class NodeRuntime(
+         Log.w("OpenClawCanvas", "canvas rehydrate request failed ($source): transport unavailable")
+         return@launch
+       }
++      Log.i(TAG, "Canvas rehydrate request sent successfully")
+       scope.launch {
+         delay(20_000)
+         if (canvasRehydrateSeq.get() != requestId) return@launch
+         if (!_canvasRehydratePending.value) return@launch
+         if (_canvasA2uiHydrated.value) return@launch
++        Log.w(TAG, "Canvas rehydrate timeout after 20s")
+         _canvasRehydratePending.value = false
+         _canvasRehydrateErrorText.value = "No canvas update yet. Tap to retry."
+       }
+@@ -527,10 +553,18 @@ class NodeRuntime(
+   val manualTls: StateFlow<Boolean> = prefs.manualTls
+   val gatewayToken: StateFlow<String> = prefs.gatewayToken
+   val onboardingCompleted: StateFlow<Boolean> = prefs.onboardingCompleted
+-  fun setGatewayToken(value: String) = prefs.setGatewayToken(value)
+-  fun setGatewayBootstrapToken(value: String) = prefs.setGatewayBootstrapToken(value)
+-  fun setGatewayPassword(value: String) = prefs.setGatewayPassword(value)
+-  fun setOnboardingCompleted(value: Boolean) = prefs.setOnboardingCompleted(value)
++  fun setGatewayToken(value: String) = prefs.setGatewayToken(value).also { 
++    Log.d(TAG, "Gateway token set, length=${value.length}")
++  }
++  fun setGatewayBootstrapToken(value: String) = prefs.setGatewayBootstrapToken(value).also {
++    Log.d(TAG, "Gateway bootstrap token set, length=${value.length}")
++  }
++  fun setGatewayPassword(value: String) = prefs.setGatewayPassword(value).also {
++    Log.d(TAG, "Gateway password set, length=${value.length}")
++  }
++  fun setOnboardingCompleted(value: Boolean) = prefs.setOnboardingCompleted(value).also {
++    Log.i(TAG, "Onboarding completed: $value")
++  }
+   val lastDiscoveredStableId: StateFlow<String> = prefs.lastDiscoveredStableId
+   val canvasDebugStatusEnabled: StateFlow<Boolean> = prefs.canvasDebugStatusEnabled
+ 
+@@ -597,10 +631,12 @@ class NodeRuntime(
+   }
+ 
+   fun setForeground(value: Boolean) {
++    Log.d(TAG, "Foreground state changed: $value")
+     _isForeground.value = value
+     if (value) {
+       reconnectPreferredGatewayOnForeground()
+     } else {
++      Log.i(TAG, "Backgrounded - stopping active voice session")
+       stopActiveVoiceSession()
+     }
+   }
+@@ -631,18 +667,30 @@ class NodeRuntime(
+     if (didAutoConnect) return
+     if (_isConnected.value) return
+     val endpoint = resolvePreferredGatewayEndpoint() ?: return
++    Log.i(TAG, "Auto-connecting to preferred gateway: ${endpoint.host}:${endpoint.port}")
+     didAutoConnect = true
+     connect(endpoint)
+   }
+ 
+   private fun reconnectPreferredGatewayOnForeground() {
+-    if (_isConnected.value) return
+-    if (_pendingGatewayTrust.value != null) return
++    Log.d(TAG, "Reconnect on foreground called")
++    if (_isConnected.value) {
++      Log.d(TAG, "Already connected, skipping foreground reconnect")
++      return
++    }
++    if (_pendingGatewayTrust.value != null) {
++      Log.d(TAG, "Pending trust prompt, skipping foreground reconnect")
++      return
++    }
+     if (connectedEndpoint != null) {
++      Log.i(TAG, "Has cached endpoint - refreshing connection")
+       refreshGatewayConnection()
+       return
+     }
+-    resolvePreferredGatewayEndpoint()?.let(::connect)
++    resolvePreferredGatewayEndpoint()?.let { endpoint ->
++      Log.i(TAG, "Connecting to preferred endpoint on foreground: ${endpoint.host}:${endpoint.port}")
++      connect(endpoint)
++    } ?: Log.d(TAG, "No preferred endpoint available for foreground reconnect")
+   }
+ 
+   fun setDisplayName(value: String) {
+@@ -650,38 +698,47 @@ class NodeRuntime(
+   }
+ 
+   fun setCameraEnabled(value: Boolean) {
++    Log.i(TAG, "Camera enabled: $value")
+     prefs.setCameraEnabled(value)
+   }
+ 
+   fun setLocationMode(mode: LocationMode) {
++    Log.i(TAG, "Location mode set: $mode")
+     prefs.setLocationMode(mode)
+   }
+ 
+   fun setLocationPreciseEnabled(value: Boolean) {
++    Log.i(TAG, "Location precise mode: $value")
+     prefs.setLocationPreciseEnabled(value)
+   }
+ 
+   fun setPreventSleep(value: Boolean) {
++    Log.d(TAG, "Prevent sleep: $value")
+     prefs.setPreventSleep(value)
+   }
+ 
+   fun setManualEnabled(value: Boolean) {
++    Log.i(TAG, "Manual gateway enabled: $value")
+     prefs.setManualEnabled(value)
+   }
+ 
+   fun setManualHost(value: String) {
++    Log.i(TAG, "Manual host set: $value")
+     prefs.setManualHost(value)
+   }
+ 
+   fun setManualPort(value: Int) {
++    Log.i(TAG, "Manual port set: $value")
+     prefs.setManualPort(value)
+   }
+ 
+   fun setManualTls(value: Boolean) {
++    Log.i(TAG, "Manual TLS: $value")
+     prefs.setManualTls(value)
+   }
+ 
+   fun setCanvasDebugStatusEnabled(value: Boolean) {
++    Log.d(TAG, "Canvas debug status enabled: $value")
+     prefs.setCanvasDebugStatusEnabled(value)
+   }
+ 
+@@ -693,9 +750,11 @@ class NodeRuntime(
+   }
+ 
+   fun setMicEnabled(value: Boolean) {
++    Log.i(TAG, "Mic enabled: $value")
+     prefs.setTalkEnabled(value)
+     if (value) {
+       // Tapping mic on interrupts any active TTS (barge-in)
++      Log.d(TAG, "Mic on - interrupting TTS and enabling chat subscription")
+       talkMode.stopTts()
+       talkMode.ttsOnAllResponses = true
+       scope.launch { talkMode.ensureChatSubscribed() }
+@@ -708,6 +767,7 @@ class NodeRuntime(
+     get() = prefs.speakerEnabled
+ 
+   fun setSpeakerEnabled(value: Boolean) {
++    Log.i(TAG, "Speaker enabled: $value")
+     prefs.setSpeakerEnabled(value)
+     if (voiceReplySpeakerLazy.isInitialized()) {
+       voiceReplySpeaker.setPlaybackEnabled(value)
+@@ -717,6 +777,7 @@ class NodeRuntime(
+   }
+ 
+   private fun stopActiveVoiceSession() {
++    Log.i(TAG, "Stopping active voice session")
+     talkMode.ttsOnAllResponses = false
+     talkMode.stopTts()
+     micCapture.setMicEnabled(false)
+@@ -725,8 +786,10 @@ class NodeRuntime(
+   }
+ 
+   fun refreshGatewayConnection() {
++    Log.i(TAG, "Refreshing gateway connection")
+     val endpoint =
+       connectedEndpoint ?: run {
++        Log.e(TAG, "Refresh failed: no cached gateway endpoint")
+         _statusText.value = "Failed: no cached gateway endpoint"
+         return
+       }
+@@ -736,6 +799,7 @@ class NodeRuntime(
+     val bootstrapToken = prefs.loadGatewayBootstrapToken()
+     val password = prefs.loadGatewayPassword()
+     val tls = connectionManager.resolveTlsParams(endpoint)
++    Log.i(TAG, "Reconnecting to ${endpoint.host}:${endpoint.port} with TLS=${tls?.required}")
+     operatorSession.connect(
+       endpoint,
+       token,
+@@ -757,15 +821,19 @@ class NodeRuntime(
+   }
+ 
+   fun connect(endpoint: GatewayEndpoint) {
++    Log.i(TAG, "Connect called to endpoint: ${endpoint.host}:${endpoint.port}")
+     val tls = connectionManager.resolveTlsParams(endpoint)
+     if (tls?.required == true && tls.expectedFingerprint.isNullOrBlank()) {
+       // First-time TLS: capture fingerprint, ask user to verify out-of-band, then store and connect.
++      Log.w(TAG, "TLS required but no fingerprint stored - prompting for trust")
+       _statusText.value = "Verify gateway TLS fingerprint…"
+       scope.launch {
+         val fp = probeGatewayTlsFingerprint(endpoint.host, endpoint.port) ?: run {
++          Log.e(TAG, "Failed to read TLS fingerprint from ${endpoint.host}:${endpoint.port}")
+           _statusText.value = "Failed: can't read TLS fingerprint"
+           return@launch
+         }
++        Log.i(TAG, "Captured TLS fingerprint: ${fp.take(16)}...")
+         _pendingGatewayTrust.value = GatewayTrustPrompt(endpoint = endpoint, fingerprintSha256 = fp)
+       }
+       return
+@@ -778,6 +846,7 @@ class NodeRuntime(
+     val token = prefs.loadGatewayToken()
+     val bootstrapToken = prefs.loadGatewayBootstrapToken()
+     val password = prefs.loadGatewayPassword()
++    Log.i(TAG, "Establishing operator and node sessions with token length=${token?.length ?: 0}, bootstrap length=${bootstrapToken?.length ?: 0}")
+     operatorSession.connect(
+       endpoint,
+       token,
+@@ -798,12 +867,14 @@ class NodeRuntime(
+ 
+   fun acceptGatewayTrustPrompt() {
+     val prompt = _pendingGatewayTrust.value ?: return
++    Log.i(TAG, "User accepted gateway trust prompt for endpoint: ${prompt.endpoint.host}:${prompt.endpoint.port}")
+     _pendingGatewayTrust.value = null
+     prefs.saveGatewayTlsFingerprint(prompt.endpoint.stableId, prompt.fingerprintSha256)
+     connect(prompt.endpoint)
+   }
+ 
+   fun declineGatewayTrustPrompt() {
++    Log.w(TAG, "User declined gateway trust prompt")
+     _pendingGatewayTrust.value = null
+     _statusText.value = "Offline"
+   }
+@@ -826,6 +897,7 @@ class NodeRuntime(
+   }
+ 
+   fun disconnect() {
++    Log.i(TAG, "Disconnecting from gateway")
+     connectedEndpoint = null
+     _pendingGatewayTrust.value = null
+     operatorSession.disconnect()
+@@ -833,14 +905,19 @@ class NodeRuntime(
+   }
+ 
+   fun handleCanvasA2UIActionFromWebView(payloadJson: String) {
++    Log.d(TAG, "handleCanvasA2UIActionFromWebView called, payload length=${payloadJson.length}")
+     scope.launch {
+       val trimmed = payloadJson.trim()
+-      if (trimmed.isEmpty()) return@launch
++      if (trimmed.isEmpty()) {
++        Log.w(TAG, "Empty payload in handleCanvasA2UIActionFromWebView")
++        return@launch
++      }
+ 
+       val root =
+         try {
+           json.parseToJsonElement(trimmed).asObjectOrNull() ?: return@launch
+-        } catch (_: Throwable) {
++        } catch (e: Throwable) {
++          Log.e(TAG, "Failed to parse payload JSON: ${e.message}")
+           return@launch
+         }
+ 
+@@ -848,7 +925,10 @@ class NodeRuntime(
+       val actionId = (userActionObj["id"] as? JsonPrimitive)?.content?.trim().orEmpty().ifEmpty {
+         java.util.UUID.randomUUID().toString()
+       }
+-      val name = OpenClawCanvasA2UIAction.extractActionName(userActionObj) ?: return@launch
++      val name = OpenClawCanvasA2UIAction.extractActionName(userActionObj) ?: run {
++        Log.w(TAG, "Failed to extract action name from payload")
++        return@launch
++      }
+ 
+       val surfaceId =
+         (userActionObj["surfaceId"] as? JsonPrimitive)?.content?.trim().orEmpty().ifEmpty { "main" }
+@@ -871,6 +951,7 @@ class NodeRuntime(
+       val connected = _nodeConnected.value
+       var error: String? = null
+       if (connected) {
++        Log.i(TAG, "Sending canvas action to node: action=$name, actionId=$actionId")
+         val sent =
+           nodeSession.sendNodeEvent(
+             event = "agent.request",
+@@ -885,9 +966,11 @@ class NodeRuntime(
+           )
+         if (!sent) {
+           error = "send failed"
++          Log.e(TAG, "Failed to send canvas action to node")
+         }
+       } else {
+         error = "gateway not connected"
++        Log.w(TAG, "Cannot send canvas action - gateway not connected")
+       }
+ 
+       try {
+@@ -898,7 +981,8 @@ class NodeRuntime(
+             error = error,
+           ),
+         )
+-      } catch (_: Throwable) {
++      } catch (e: Throwable) {
++        Log.e(TAG, "Failed to dispatch A2UI action status: ${e.message}")
+         // ignore
+       }
+     }
+diff --git a/apps/android/app/src/main/java/ai/openclaw/app/node/InvokeCommandRegistry.kt b/apps/android/app/src/main/java/ai/openclaw/app/node/InvokeCommandRegistry.kt
+index 6c755830a2..5e31c68f06 100644
+--- a/apps/android/app/src/main/java/ai/openclaw/app/node/InvokeCommandRegistry.kt
++++ b/apps/android/app/src/main/java/ai/openclaw/app/node/InvokeCommandRegistry.kt
+@@ -1,5 +1,6 @@
+ package ai.openclaw.app.node
+ 
++import ai.openclaw.app.protocol.OpenClawAppCommand
+ import ai.openclaw.app.protocol.OpenClawCalendarCommand
+ import ai.openclaw.app.protocol.OpenClawCanvasA2UICommand
+ import ai.openclaw.app.protocol.OpenClawCanvasCommand
+@@ -94,6 +95,10 @@ object InvokeCommandRegistry {
+         name = OpenClawCapability.CallLog.rawValue,
+         availability = NodeCapabilityAvailability.CallLogAvailable,
+       ),
++      NodeCapabilitySpec(
++        name = OpenClawCapability.AppLauncher.rawValue,
++        availability = NodeCapabilityAvailability.Always,
++      ),
+     )
+ 
+   val all: List<InvokeCommandSpec> =
+@@ -213,6 +218,19 @@ object InvokeCommandRegistry {
+         name = "debug.ed25519",
+         availability = InvokeCommandAvailability.DebugBuild,
+       ),
++      // App Launcher commands
++      InvokeCommandSpec(
++        name = OpenClawAppCommand.LaunchBilibili.rawValue,
++        requiresForeground = false,
++      ),
++      InvokeCommandSpec(
++        name = OpenClawAppCommand.OpenFavorites.rawValue,
++        requiresForeground = false,
++      ),
++      InvokeCommandSpec(
++        name = OpenClawAppCommand.Launch.rawValue,
++        requiresForeground = false,
++      ),
+     )
+ 
+   private val byNameInternal: Map<String, InvokeCommandSpec> = all.associateBy { it.name }
+diff --git a/apps/android/app/src/main/java/ai/openclaw/app/node/InvokeDispatcher.kt b/apps/android/app/src/main/java/ai/openclaw/app/node/InvokeDispatcher.kt
+index 17df029a5c..e6ebfa682b 100644
+--- a/apps/android/app/src/main/java/ai/openclaw/app/node/InvokeDispatcher.kt
++++ b/apps/android/app/src/main/java/ai/openclaw/app/node/InvokeDispatcher.kt
+@@ -5,6 +5,7 @@ import ai.openclaw.app.protocol.OpenClawCalendarCommand
+ import ai.openclaw.app.protocol.OpenClawCanvasA2UICommand
+ import ai.openclaw.app.protocol.OpenClawCanvasCommand
+ import ai.openclaw.app.protocol.OpenClawCameraCommand
++import ai.openclaw.app.protocol.OpenClawAppCommand
+ import ai.openclaw.app.protocol.OpenClawCallLogCommand
+ import ai.openclaw.app.protocol.OpenClawContactsCommand
+ import ai.openclaw.app.protocol.OpenClawDeviceCommand
+@@ -29,6 +30,7 @@ class InvokeDispatcher(
+   private val a2uiHandler: A2UIHandler,
+   private val debugHandler: DebugHandler,
+   private val callLogHandler: CallLogHandler,
++  private val appLauncherHandler: AppLauncherHandler,
+   private val isForeground: () -> Boolean,
+   private val cameraEnabled: () -> Boolean,
+   private val locationEnabled: () -> Boolean,
+@@ -169,6 +171,11 @@ class InvokeDispatcher(
+       // CallLog command
+       OpenClawCallLogCommand.Search.rawValue -> callLogHandler.handleCallLogSearch(paramsJson)
+ 
++      // App Launcher commands
++      OpenClawAppCommand.LaunchBilibili.rawValue -> appLauncherHandler.handleLaunchBilibili(paramsJson)
++      OpenClawAppCommand.OpenFavorites.rawValue -> appLauncherHandler.handleOpenBilibiliFavorites(paramsJson)
++      OpenClawAppCommand.Launch.rawValue -> appLauncherHandler.handleLaunchApp(paramsJson)
++
+       // Debug commands
+       "debug.ed25519" -> debugHandler.handleEd25519()
+       "debug.logs" -> debugHandler.handleLogs()
+diff --git a/apps/android/app/src/main/java/ai/openclaw/app/protocol/OpenClawProtocolConstants.kt b/apps/android/app/src/main/java/ai/openclaw/app/protocol/OpenClawProtocolConstants.kt
+index ceed86f767..2823481bab 100644
+--- a/apps/android/app/src/main/java/ai/openclaw/app/protocol/OpenClawProtocolConstants.kt
++++ b/apps/android/app/src/main/java/ai/openclaw/app/protocol/OpenClawProtocolConstants.kt
+@@ -14,6 +14,12 @@ enum class OpenClawCapability(val rawValue: String) {
+   Calendar("calendar"),
+   Motion("motion"),
+   CallLog("callLog"),
++  AppLauncher("appLauncher"),
++  ;
++  
++  companion object {
++    fun allCapabilities(): List<OpenClawCapability> = entries.toList()
++  }
+ }
+ 
+ enum class OpenClawCanvasCommand(val rawValue: String) {
+@@ -148,3 +154,14 @@ enum class OpenClawCallLogCommand(val rawValue: String) {
+     const val NamespacePrefix: String = "callLog."
+   }
+ }
++
++enum class OpenClawAppCommand(val rawValue: String) {
++  Launch("app.launch"),
++  LaunchBilibili("app.launch.bilibili"),
++  OpenFavorites("app.open.favorites"),
++  ;
++
++  companion object {
++    const val NamespacePrefix: String = "app."
++  }
++}
+diff --git a/apps/android/app/src/main/java/ai/openclaw/app/ui/OnboardingFlow.kt b/apps/android/app/src/main/java/ai/openclaw/app/ui/OnboardingFlow.kt
+index 28a28e281c..4e4ef43f75 100644
+--- a/apps/android/app/src/main/java/ai/openclaw/app/ui/OnboardingFlow.kt
++++ b/apps/android/app/src/main/java/ai/openclaw/app/ui/OnboardingFlow.kt
+@@ -9,6 +9,7 @@ import android.hardware.SensorManager
+ import android.net.Uri
+ import android.os.Build
+ import android.provider.Settings
++import android.util.Log
+ import androidx.compose.foundation.BorderStroke
+ import androidx.activity.compose.rememberLauncherForActivityResult
+ import androidx.activity.result.contract.ActivityResultContracts
+@@ -98,8 +99,10 @@ import ai.openclaw.app.LocationMode
+ import ai.openclaw.app.MainViewModel
+ import ai.openclaw.app.node.DeviceNotificationListenerService
+ import com.google.mlkit.vision.barcode.common.Barcode
+-import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
+-import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
++import com.google.mlkit.vision.barcode.BarcodeScanning
++import com.google.mlkit.vision.common.InputImage
++
++private const val TAG = "OnboardingFlow"
+ 
+ private enum class OnboardingStep(val index: Int, val label: String) {
+   Welcome(1, "Welcome"),
+@@ -208,6 +211,7 @@ private val onboardingCaption2Style: TextStyle
+ 
+ @Composable
+ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
++  Log.d(TAG, "OnboardingFlow started")
+   val context = androidx.compose.ui.platform.LocalContext.current
+   val statusText by viewModel.statusText.collectAsState()
+   val isConnected by viewModel.isConnected.collectAsState()
+@@ -229,13 +233,29 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
+   var attemptedConnect by rememberSaveable { mutableStateOf(false) }
+ 
+   val lifecycleOwner = LocalLifecycleOwner.current
+-  val qrScannerOptions =
+-    remember {
+-      GmsBarcodeScannerOptions.Builder()
+-        .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+-        .build()
++  
++  // QR scanner result launcher
++  val qrScannerLauncher = rememberLauncherForActivityResult(
++    contract = ActivityResultContracts.StartActivityForResult()
++  ) { result ->
++    if (result.resultCode == android.app.Activity.RESULT_OK) {
++      val scannedCode = result.data?.getStringExtra("setup_code").orEmpty()
++      Log.i(TAG, "QR scanner returned code: ${scannedCode.take(20)}...")
++      
++      if (scannedCode.isNotEmpty()) {
++        setupCode = scannedCode
++        gatewayInputMode = GatewayInputMode.SetupCode
++        gatewayError = null
++        attemptedConnect = false
++        Log.i(TAG, "Successfully received scanned setup code")
++      } else {
++        gatewayError = "QR code did not contain a valid setup code."
++        Log.w(TAG, "QR scanner returned empty code")
++      }
++    } else {
++      Log.d(TAG, "QR scanner cancelled or failed")
+     }
+-  val qrScanner = remember(context, qrScannerOptions) { GmsBarcodeScanning.getClient(context, qrScannerOptions) }
++  }
+ 
+   val smsAvailable =
+     remember(context) {
+@@ -393,15 +413,19 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
+     }
+ 
+   val proceedFromPermissions: () -> Unit = proceed@{
++    Log.d(TAG, "proceedFromPermissions called")
+     var openedSpecialSetup = false
+     if (enableNotificationListener && !isNotificationListenerEnabled(context)) {
++      Log.i(TAG, "Opening notification listener settings - not enabled yet")
+       openNotificationListenerSettings(context)
+       openedSpecialSetup = true
+     }
+     if (openedSpecialSetup) {
++      Log.w(TAG, "Waiting for user to return from notification listener settings")
+       return@proceed
+     }
+     step = OnboardingStep.FinalCheck
++    Log.i(TAG, "Navigated to FinalCheck step from Permissions")
+   }
+ 
+   val togglePermissionLauncher =
+@@ -413,28 +437,35 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
+ 
+   val requestPermissionToggle: (PermissionToggle, Boolean, List<String>) -> Unit =
+     request@{ toggle, enabled, permissions ->
++      Log.d(TAG, "requestPermissionToggle: toggle=$toggle, enabled=$enabled, permissions=$permissions")
+       if (!enabled) {
+         setPermissionToggleEnabled(toggle, false)
++        Log.d(TAG, "Permission toggle disabled: $toggle")
+         return@request
+       }
+       if (isPermissionToggleGranted(toggle)) {
++        Log.d(TAG, "Permission already granted for $toggle")
+         setPermissionToggleEnabled(toggle, true)
+         return@request
+       }
+       val missing = permissions.distinct().filterNot { isPermissionGranted(context, it) }
+       if (missing.isEmpty()) {
++        Log.d(TAG, "All permissions already granted for $toggle")
+         setPermissionToggleEnabled(toggle, isPermissionToggleGranted(toggle))
+         return@request
+       }
++      Log.i(TAG, "Requesting permissions: $missing for toggle: $toggle")
+       pendingPermissionToggle = toggle
+       togglePermissionLauncher.launch(missing.toTypedArray())
+     }
+ 
+   val requestSpecialAccessToggle: (SpecialAccessToggle, Boolean) -> Unit =
+     request@{ toggle, enabled ->
++      Log.d(TAG, "requestSpecialAccessToggle: toggle=$toggle, enabled=$enabled")
+       if (!enabled) {
+         setSpecialAccessToggleEnabled(toggle, false)
+         pendingSpecialAccessToggle = null
++        Log.d(TAG, "Special access toggle disabled: $toggle")
+         return@request
+       }
+       val grantedNow =
+@@ -442,10 +473,12 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
+           SpecialAccessToggle.NotificationListener -> isNotificationListenerEnabled(context)
+         }
+       if (grantedNow) {
++        Log.d(TAG, "Special access already granted for $toggle")
+         setSpecialAccessToggleEnabled(toggle, true)
+         pendingSpecialAccessToggle = null
+         return@request
+       }
++      Log.i(TAG, "Opening settings for special access: $toggle")
+       pendingSpecialAccessToggle = toggle
+       when (toggle) {
+         SpecialAccessToggle.NotificationListener -> openNotificationListenerSettings(context)
+@@ -453,16 +486,20 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
+     }
+ 
+   DisposableEffect(lifecycleOwner, context, pendingSpecialAccessToggle) {
++    Log.d(TAG, "DisposableEffect registered for lifecycle changes")
+     val observer =
+       LifecycleEventObserver { _, event ->
+         if (event != Lifecycle.Event.ON_RESUME) {
+           return@LifecycleEventObserver
+         }
++        Log.d(TAG, "Lifecycle ON_RESUME event received")
+         when (pendingSpecialAccessToggle) {
+           SpecialAccessToggle.NotificationListener -> {
++            val enabled = isNotificationListenerEnabled(context)
++            Log.i(TAG, "Notification listener access check after resume: enabled=$enabled")
+             setSpecialAccessToggleEnabled(
+               SpecialAccessToggle.NotificationListener,
+-              isNotificationListenerEnabled(context),
++              enabled,
+             )
+             pendingSpecialAccessToggle = null
+           }
+@@ -470,13 +507,20 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
+         }
+       }
+     lifecycleOwner.lifecycle.addObserver(observer)
+-    onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
++    onDispose { 
++      Log.d(TAG, "DisposableEffect disposed")
++      lifecycleOwner.lifecycle.removeObserver(observer) 
++    }
+   }
+ 
+   if (pendingTrust != null) {
+     val prompt = pendingTrust!!
++    Log.i(TAG, "Showing gateway trust prompt: fingerprint=${prompt.fingerprintSha256.take(16)}...")
+     AlertDialog(
+-      onDismissRequest = { viewModel.declineGatewayTrustPrompt() },
++      onDismissRequest = { 
++        Log.i(TAG, "User declined gateway trust prompt")
++        viewModel.declineGatewayTrustPrompt() 
++      },
+       containerColor = onboardingSurface,
+       title = { Text("Trust this gateway?", style = onboardingHeadlineStyle, color = onboardingText) },
+       text = {
+@@ -488,7 +532,10 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
+       },
+       confirmButton = {
+         TextButton(
+-          onClick = { viewModel.acceptGatewayTrustPrompt() },
++          onClick = { 
++            Log.i(TAG, "User accepted gateway trust prompt")
++            viewModel.acceptGatewayTrustPrompt() 
++          },
+           colors = ButtonDefaults.textButtonColors(contentColor = onboardingAccent),
+         ) {
+           Text("Trust and continue")
+@@ -556,50 +603,48 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
+               gatewayPassword = gatewayPassword,
+               gatewayError = gatewayError,
+               onScanQrClick = {
++                Log.i(TAG, "QR scan button clicked - launching scanner activity")
+                 gatewayError = null
+-                qrScanner.startScan()
+-                  .addOnSuccessListener { barcode ->
+-                    val contents = barcode.rawValue?.trim().orEmpty()
+-                    if (contents.isEmpty()) {
+-                      return@addOnSuccessListener
+-                    }
+-                    val scannedSetupCode = resolveScannedSetupCode(contents)
+-                    if (scannedSetupCode == null) {
+-                      gatewayError = "QR code did not contain a valid setup code."
+-                      return@addOnSuccessListener
+-                    }
+-                    setupCode = scannedSetupCode
+-                    gatewayInputMode = GatewayInputMode.SetupCode
+-                    gatewayError = null
+-                    attemptedConnect = false
+-                  }
+-                  .addOnCanceledListener {
+-                    // User dismissed the scanner; preserve current form state.
+-                  }
+-                  .addOnFailureListener {
+-                    gatewayError = qrScannerErrorMessage()
+-                  }
++                // Launch QR scanner activity and wait for result
++                val scannerIntent = Intent(context, QrScannerActivity::class.java)
++                qrScannerLauncher.launch(scannerIntent)
++              },
++              onAdvancedOpenChange = { 
++                Log.d(TAG, "Advanced setup toggle changed: open=$it")
++                gatewayAdvancedOpen = it 
+               },
+-              onAdvancedOpenChange = { gatewayAdvancedOpen = it },
+               onInputModeChange = {
++                Log.d(TAG, "Gateway input mode changed: $it")
+                 gatewayInputMode = it
+                 gatewayError = null
+               },
+               onSetupCodeChange = {
++                Log.d(TAG, "Setup code changed, new length=${it.length}")
+                 setupCode = it
+                 gatewayError = null
+               },
+               onManualHostChange = {
++                Log.d(TAG, "Manual host changed: $it")
+                 manualHost = it
+                 gatewayError = null
+               },
+               onManualPortChange = {
++                Log.d(TAG, "Manual port changed: $it")
+                 manualPort = it
+                 gatewayError = null
+               },
+-              onManualTlsChange = { manualTls = it },
+-              onTokenChange = viewModel::setGatewayToken,
+-              onPasswordChange = { gatewayPassword = it },
++              onManualTlsChange = { 
++                Log.d(TAG, "Manual TLS toggle changed: $it")
++                manualTls = it 
++              },
++              onTokenChange = { 
++                Log.d(TAG, "Gateway token changed, new length=${it.length}")
++                viewModel.setGatewayToken(it) 
++              },
++              onPasswordChange = { 
++                Log.d(TAG, "Gateway password changed, new length=${it.length}")
++                gatewayPassword = it 
++              },
+             )
+           OnboardingStep.Permissions ->
+             PermissionsStep(
+@@ -621,6 +666,7 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
+               enableCallLog = enableCallLog,
+               context = context,
+               onDiscoveryChange = { checked ->
++                Log.d(TAG, "Discovery permission toggle changed: $checked")
+                 requestPermissionToggle(
+                   PermissionToggle.Discovery,
+                   checked,
+@@ -628,6 +674,7 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
+                 )
+               },
+               onLocationChange = { checked ->
++                Log.d(TAG, "Location permission toggle changed: $checked")
+                 requestPermissionToggle(
+                   PermissionToggle.Location,
+                   checked,
+@@ -638,6 +685,7 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
+                 )
+               },
+               onNotificationsChange = { checked ->
++                Log.d(TAG, "Notifications permission toggle changed: $checked")
+                 if (!notificationsPermissionRequired) {
+                   setPermissionToggleEnabled(PermissionToggle.Notifications, checked)
+                 } else {
+@@ -649,9 +697,11 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
+                 }
+               },
+               onNotificationListenerChange = { checked ->
++                Log.d(TAG, "Notification listener toggle changed: $checked")
+                 requestSpecialAccessToggle(SpecialAccessToggle.NotificationListener, checked)
+               },
+               onMicrophoneChange = { checked ->
++                Log.d(TAG, "Microphone permission toggle changed: $checked")
+                 requestPermissionToggle(
+                   PermissionToggle.Microphone,
+                   checked,
+@@ -659,6 +709,7 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
+                 )
+               },
+               onCameraChange = { checked ->
++                Log.d(TAG, "Camera permission toggle changed: $checked")
+                 requestPermissionToggle(
+                   PermissionToggle.Camera,
+                   checked,
+@@ -666,6 +717,7 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
+                 )
+               },
+               onPhotosChange = { checked ->
++                Log.d(TAG, "Photos permission toggle changed: $checked")
+                 requestPermissionToggle(
+                   PermissionToggle.Photos,
+                   checked,
+@@ -673,6 +725,7 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
+                 )
+               },
+               onContactsChange = { checked ->
++                Log.d(TAG, "Contacts permission toggle changed: $checked")
+                 requestPermissionToggle(
+                   PermissionToggle.Contacts,
+                   checked,
+@@ -683,6 +736,7 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
+                 )
+               },
+               onCalendarChange = { checked ->
++                Log.d(TAG, "Calendar permission toggle changed: $checked")
+                 requestPermissionToggle(
+                   PermissionToggle.Calendar,
+                   checked,
+@@ -693,9 +747,12 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
+                 )
+               },
+               onMotionChange = { checked ->
++                Log.d(TAG, "Motion permission toggle changed: $checked, motionAvailable=$motionAvailable")
+                 if (!motionAvailable) {
++                  Log.w(TAG, "Motion toggle attempted but not available")
+                   setPermissionToggleEnabled(PermissionToggle.Motion, false)
+                 } else if (!motionPermissionRequired) {
++                  Log.d(TAG, "Motion permission not required, setting directly")
+                   setPermissionToggleEnabled(PermissionToggle.Motion, checked)
+                 } else {
+                   requestPermissionToggle(
+@@ -706,7 +763,9 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
+                 }
+               },
+               onSmsChange = { checked ->
++                Log.d(TAG, "SMS permission toggle changed: $checked, smsAvailable=$smsAvailable")
+                 if (!smsAvailable) {
++                  Log.w(TAG, "SMS toggle attempted but not available")
+                   setPermissionToggleEnabled(PermissionToggle.Sms, false)
+                 } else {
+                   requestPermissionToggle(
+@@ -717,7 +776,9 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
+                 }
+               },
+               onCallLogChange = { checked ->
++                Log.d(TAG, "Call log permission toggle changed: $checked, callLogAvailable=$callLogAvailable")
+                 if (!callLogAvailable) {
++                  Log.w(TAG, "Call log toggle attempted but not available")
+                   setPermissionToggleEnabled(PermissionToggle.CallLog, false)
+                 } else {
+                   requestPermissionToggle(
+@@ -758,6 +819,7 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
+         ) {
+           IconButton(
+             onClick = {
++              Log.d(TAG, "Back button clicked: current step=$step")
+               step =
+                 when (step) {
+                   OnboardingStep.Welcome -> OnboardingStep.Welcome
+@@ -765,6 +827,7 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
+                   OnboardingStep.Permissions -> OnboardingStep.Gateway
+                   OnboardingStep.FinalCheck -> OnboardingStep.Permissions
+                 }
++              Log.i(TAG, "Navigated to step: $step")
+             },
+             enabled = backEnabled,
+           ) {
+@@ -779,7 +842,10 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
+         when (step) {
+           OnboardingStep.Welcome -> {
+             Button(
+-              onClick = { step = OnboardingStep.Gateway },
++              onClick = { 
++                Log.i(TAG, "Welcome Next button clicked - navigating to Gateway step")
++                step = OnboardingStep.Gateway 
++              },
+               modifier = Modifier.weight(1f).height(52.dp),
+               shape = RoundedCornerShape(14.dp),
+               colors = onboardingPrimaryButtonColors(),
+@@ -790,24 +856,30 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
+           OnboardingStep.Gateway -> {
+             Button(
+               onClick = {
++                Log.i(TAG, "Gateway Next button clicked, inputMode=$gatewayInputMode")
+                 if (gatewayInputMode == GatewayInputMode.SetupCode) {
+                   val parsedSetup = decodeGatewaySetupCode(setupCode)
+                   if (parsedSetup == null) {
++                    Log.e(TAG, "Invalid setup code: '$setupCode'")
+                     gatewayError = "Scan QR code first, or use Advanced setup."
+                     return@Button
+                   }
+                   val parsedGateway = parseGatewayEndpoint(parsedSetup.url)
+                   if (parsedGateway == null) {
++                    Log.e(TAG, "Invalid gateway URL in setup code: ${parsedSetup.url}")
+                     gatewayError = "Setup code has invalid gateway URL."
+                     return@Button
+                   }
+                   gatewayUrl = parsedSetup.url
++                  Log.i(TAG, "Parsed gateway URL from setup code: $gatewayUrl")
+                   viewModel.setGatewayBootstrapToken(parsedSetup.bootstrapToken.orEmpty())
+                   val sharedToken = parsedSetup.token.orEmpty().trim()
+                   val password = parsedSetup.password.orEmpty().trim()
+                   if (sharedToken.isNotEmpty()) {
++                    Log.i(TAG, "Using shared token from setup code")
+                     viewModel.setGatewayToken(sharedToken)
+                   } else if (!parsedSetup.bootstrapToken.isNullOrBlank()) {
++                    Log.i(TAG, "Using bootstrap token, clearing shared token")
+                     viewModel.setGatewayToken("")
+                   }
+                   gatewayPassword = password
+@@ -818,13 +890,16 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
+                   val manualUrl = composeGatewayManualUrl(manualHost, manualPort, manualTls)
+                   val parsedGateway = manualUrl?.let(::parseGatewayEndpoint)
+                   if (parsedGateway == null) {
++                    Log.e(TAG, "Invalid manual endpoint: host=$manualHost, port=$manualPort, tls=$manualTls")
+                     gatewayError = "Manual endpoint is invalid."
+                     return@Button
+                   }
+                   gatewayUrl = parsedGateway.displayUrl
++                  Log.i(TAG, "Manual gateway URL: $gatewayUrl")
+                   viewModel.setGatewayBootstrapToken("")
+                 }
+                 step = OnboardingStep.Permissions
++                Log.i(TAG, "Navigated to Permissions step")
+               },
+               modifier = Modifier.weight(1f).height(52.dp),
+               shape = RoundedCornerShape(14.dp),
+@@ -836,6 +911,8 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
+           OnboardingStep.Permissions -> {
+             Button(
+               onClick = {
++                Log.i(TAG, "Permissions Next button clicked")
++                Log.i(TAG, "Camera enabled: $enableCamera, Location enabled: $enableLocation")
+                 viewModel.setCameraEnabled(enableCamera)
+                 viewModel.setLocationMode(if (enableLocation) LocationMode.WhileUsing else LocationMode.Off)
+                 proceedFromPermissions()
+@@ -850,7 +927,10 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
+           OnboardingStep.FinalCheck -> {
+             if (isConnected) {
+               Button(
+-                onClick = { viewModel.setOnboardingCompleted(true) },
++                onClick = { 
++                  Log.i(TAG, "Finish button clicked - onboarding completed successfully")
++                  viewModel.setOnboardingCompleted(true) 
++                },
+                 modifier = Modifier.weight(1f).height(52.dp),
+                 shape = RoundedCornerShape(14.dp),
+                 colors = onboardingPrimaryButtonColors(),
+@@ -860,29 +940,36 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
+             } else {
+               Button(
+                 onClick = {
++                  Log.i(TAG, "Connect button clicked")
+                   val parsed = parseGatewayEndpoint(gatewayUrl)
+                   if (parsed == null) {
++                    Log.e(TAG, "Invalid gateway URL: $gatewayUrl")
+                     step = OnboardingStep.Gateway
+                     gatewayError = "Invalid gateway URL."
+                     return@Button
+                   }
+                   val token = persistedGatewayToken.trim()
+                   val password = gatewayPassword.trim()
++                  Log.i(TAG, "Connecting with token length=${token.length}, password length=${password.length}")
+                   attemptedConnect = true
+                   viewModel.setManualEnabled(true)
+                   viewModel.setManualHost(parsed.host)
+                   viewModel.setManualPort(parsed.port)
+                   viewModel.setManualTls(parsed.tls)
+                   if (gatewayInputMode == GatewayInputMode.Manual) {
++                    Log.d(TAG, "Manual mode - clearing bootstrap token")
+                     viewModel.setGatewayBootstrapToken("")
+                   }
+                   if (token.isNotEmpty()) {
++                    Log.d(TAG, "Setting gateway token")
+                     viewModel.setGatewayToken(token)
+                   } else {
++                    Log.d(TAG, "Clearing gateway token")
+                     viewModel.setGatewayToken("")
+                   }
+                   viewModel.setGatewayPassword(password)
+                   viewModel.connectManual()
++                  Log.i(TAG, "Connection attempt initiated")
+                 },
+                 modifier = Modifier.weight(1f).height(52.dp),
+                 shape = RoundedCornerShape(14.dp),
+@@ -1022,6 +1109,7 @@ private fun GatewayStep(
+   val manualResolvedEndpoint = remember(manualHost, manualPort, manualTls) { composeGatewayManualUrl(manualHost, manualPort, manualTls)?.let { parseGatewayEndpoint(it)?.displayUrl } }
+ 
+   StepShell(title = "Gateway Connection") {
++    Log.d(TAG, "GatewayStep rendered, inputMode=$inputMode, advancedOpen=$advancedOpen")
+     Text(
+       "Run `openclaw qr` on your gateway host, then scan the code with this device.",
+       style = onboardingCalloutStyle,
+@@ -1540,6 +1628,8 @@ private fun FinalStep(
+   val showDiagnostics = gatewayStatusHasDiagnostics(statusText)
+   val pairingRequired = gatewayStatusLooksLikePairing(statusText)
+ 
++  Log.d(TAG, "FinalStep rendered, isConnected=$isConnected, attemptedConnect=$attemptedConnect, status=$statusText")
++
+   Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+     Text("Review", style = onboardingTitle1Style, color = onboardingText)
+ 
+@@ -1699,6 +1789,7 @@ private fun FinalStep(
+             )
+             Button(
+               onClick = {
++                Log.i(TAG, "Copy report button clicked")
+                 copyGatewayDiagnosticsReport(
+                   context = context,
+                   screen = "onboarding final check",
+@@ -1834,7 +1925,9 @@ private fun FeatureCard(
+ }
+ 
+ private fun isPermissionGranted(context: Context, permission: String): Boolean {
+-  return ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
++  val granted = ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
++  Log.d(TAG, "isPermissionGranted: $permission = $granted")
++  return granted
+ }
+ 
+ private fun qrScannerErrorMessage(): String {
+@@ -1842,7 +1935,9 @@ private fun qrScannerErrorMessage(): String {
+ }
+ 
+ private fun isNotificationListenerEnabled(context: Context): Boolean {
+-  return DeviceNotificationListenerService.isAccessEnabled(context)
++  val enabled = DeviceNotificationListenerService.isAccessEnabled(context)
++  Log.d(TAG, "isNotificationListenerEnabled: $enabled")
++  return enabled
+ }
+ 
+ private fun openNotificationListenerSettings(context: Context) {
+diff --git a/apps/android/gradle/wrapper/gradle-wrapper.properties b/apps/android/gradle/wrapper/gradle-wrapper.properties
+index 37f78a6af8..3861540b31 100644
+--- a/apps/android/gradle/wrapper/gradle-wrapper.properties
++++ b/apps/android/gradle/wrapper/gradle-wrapper.properties
+@@ -1,6 +1,6 @@
+ distributionBase=GRADLE_USER_HOME
+ distributionPath=wrapper/dists
+-distributionUrl=https\://services.gradle.org/distributions/gradle-9.3.1-bin.zip
++distributionUrl=https\://mirrors.aliyun.com/macports/distfiles/gradle/gradle-9.3.1-bin.zip
+ networkTimeout=10000
+ validateDistributionUrl=true
+ zipStoreBase=GRADLE_USER_HOME
+diff --git a/apps/android/settings.gradle.kts b/apps/android/settings.gradle.kts
+index 25e5d09bbe..659ef2c156 100644
+--- a/apps/android/settings.gradle.kts
++++ b/apps/android/settings.gradle.kts
+@@ -9,8 +9,12 @@ pluginManagement {
+ dependencyResolutionManagement {
+   repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+   repositories {
+-    google()
+-    mavenCentral()
++    google {
++      url = uri("https://maven.aliyun.com/repository/google")
++    }
++    mavenCentral {
++      url = uri("https://maven.aliyun.com/repository/public")
++    }
+   }
+ }
+ 

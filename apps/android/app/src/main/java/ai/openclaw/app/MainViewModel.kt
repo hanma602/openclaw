@@ -1,6 +1,7 @@
 package ai.openclaw.app
 
 import android.app.Application
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.viewModelScope
@@ -23,16 +24,23 @@ import kotlinx.coroutines.flow.stateIn
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class MainViewModel(app: Application) : AndroidViewModel(app) {
+  private val TAG = "MainViewModel"
   private val nodeApp = app as NodeApp
   private val prefs = nodeApp.prefs
   private val runtimeRef = MutableStateFlow<NodeRuntime?>(null)
   private var foreground = true
 
+  init {
+    Log.i(TAG, "MainViewModel initialized")
+  }
+
   private fun ensureRuntime(): NodeRuntime {
     runtimeRef.value?.let { return it }
+    Log.d(TAG, "ensureRuntime - creating new instance")
     val runtime = nodeApp.ensureRuntime()
     runtime.setForeground(foreground)
     runtimeRef.value = runtime
+    Log.i(TAG, "ensureRuntime - created new NodeRuntime instance")
     return runtime
   }
 
@@ -106,8 +114,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
   val pendingRunCount: StateFlow<Int> = runtimeState(initial = 0) { it.pendingRunCount }
 
   init {
+    Log.d(TAG, "MainViewModel init - onboardingCompleted=${prefs.onboardingCompleted.value}")
     if (prefs.onboardingCompleted.value) {
+      Log.i(TAG, "Onboarding already completed - ensuring runtime")
       ensureRuntime()
+    } else {
+      Log.d(TAG, "Onboarding not completed yet")
     }
   }
 
@@ -121,16 +133,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     get() = ensureRuntime().sms
 
   fun attachRuntimeUi(owner: LifecycleOwner, permissionRequester: PermissionRequester) {
-    val runtime = runtimeRef.value ?: return
+    Log.i(TAG, "attachRuntimeUi called")
+    val runtime = runtimeRef.value ?: run {
+      Log.w(TAG, "attachRuntimeUi - runtime not available")
+      return
+    }
+    Log.d(TAG, "Attaching lifecycle owner and permission requester to camera and sms")
     runtime.camera.attachLifecycleOwner(owner)
     runtime.camera.attachPermissionRequester(permissionRequester)
     runtime.sms.attachPermissionRequester(permissionRequester)
+    Log.i(TAG, "attachRuntimeUi completed successfully")
   }
 
   fun setForeground(value: Boolean) {
+    Log.d(TAG, "setForeground: $value")
     foreground = value
     val runtime =
       if (value && prefs.onboardingCompleted.value) {
+        Log.d(TAG, "Ensuring runtime for foreground mode")
         ensureRuntime()
       } else {
         runtimeRef.value
@@ -187,7 +207,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
   }
 
   fun setOnboardingCompleted(value: Boolean) {
+    Log.i(TAG, "setOnboardingCompleted: $value")
     if (value) {
+      Log.d(TAG, "Onboarding completed - ensuring runtime")
       ensureRuntime()
     }
     prefs.setOnboardingCompleted(value)

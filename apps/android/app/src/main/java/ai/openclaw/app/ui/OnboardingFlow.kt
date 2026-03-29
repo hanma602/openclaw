@@ -9,6 +9,7 @@ import android.hardware.SensorManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import android.util.Log
 import androidx.compose.foundation.BorderStroke
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -98,8 +99,10 @@ import ai.openclaw.app.LocationMode
 import ai.openclaw.app.MainViewModel
 import ai.openclaw.app.node.DeviceNotificationListenerService
 import com.google.mlkit.vision.barcode.common.Barcode
-import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
-import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
+import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.common.InputImage
+
+private const val TAG = "OnboardingFlow"
 
 private enum class OnboardingStep(val index: Int, val label: String) {
   Welcome(1, "Welcome"),
@@ -208,6 +211,7 @@ private val onboardingCaption2Style: TextStyle
 
 @Composable
 fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
+  Log.d(TAG, "OnboardingFlow started")
   val context = androidx.compose.ui.platform.LocalContext.current
   val statusText by viewModel.statusText.collectAsState()
   val isConnected by viewModel.isConnected.collectAsState()
@@ -229,13 +233,29 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
   var attemptedConnect by rememberSaveable { mutableStateOf(false) }
 
   val lifecycleOwner = LocalLifecycleOwner.current
-  val qrScannerOptions =
-    remember {
-      GmsBarcodeScannerOptions.Builder()
-        .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
-        .build()
+  
+  // QR scanner result launcher
+  val qrScannerLauncher = rememberLauncherForActivityResult(
+    contract = ActivityResultContracts.StartActivityForResult()
+  ) { result ->
+    if (result.resultCode == android.app.Activity.RESULT_OK) {
+      val scannedCode = result.data?.getStringExtra("setup_code").orEmpty()
+      Log.i(TAG, "QR scanner returned code: ${scannedCode.take(20)}...")
+      
+      if (scannedCode.isNotEmpty()) {
+        setupCode = scannedCode
+        gatewayInputMode = GatewayInputMode.SetupCode
+        gatewayError = null
+        attemptedConnect = false
+        Log.i(TAG, "Successfully received scanned setup code")
+      } else {
+        gatewayError = "QR code did not contain a valid setup code."
+        Log.w(TAG, "QR scanner returned empty code")
+      }
+    } else {
+      Log.d(TAG, "QR scanner cancelled or failed")
     }
-  val qrScanner = remember(context, qrScannerOptions) { GmsBarcodeScanning.getClient(context, qrScannerOptions) }
+  }
 
   val smsAvailable =
     remember(context) {
@@ -393,15 +413,19 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
     }
 
   val proceedFromPermissions: () -> Unit = proceed@{
+    Log.d(TAG, "proceedFromPermissions called")
     var openedSpecialSetup = false
     if (enableNotificationListener && !isNotificationListenerEnabled(context)) {
+      Log.i(TAG, "Opening notification listener settings - not enabled yet")
       openNotificationListenerSettings(context)
       openedSpecialSetup = true
     }
     if (openedSpecialSetup) {
+      Log.w(TAG, "Waiting for user to return from notification listener settings")
       return@proceed
     }
     step = OnboardingStep.FinalCheck
+    Log.i(TAG, "Navigated to FinalCheck step from Permissions")
   }
 
   val togglePermissionLauncher =
@@ -413,28 +437,35 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
 
   val requestPermissionToggle: (PermissionToggle, Boolean, List<String>) -> Unit =
     request@{ toggle, enabled, permissions ->
+      Log.d(TAG, "requestPermissionToggle: toggle=$toggle, enabled=$enabled, permissions=$permissions")
       if (!enabled) {
         setPermissionToggleEnabled(toggle, false)
+        Log.d(TAG, "Permission toggle disabled: $toggle")
         return@request
       }
       if (isPermissionToggleGranted(toggle)) {
+        Log.d(TAG, "Permission already granted for $toggle")
         setPermissionToggleEnabled(toggle, true)
         return@request
       }
       val missing = permissions.distinct().filterNot { isPermissionGranted(context, it) }
       if (missing.isEmpty()) {
+        Log.d(TAG, "All permissions already granted for $toggle")
         setPermissionToggleEnabled(toggle, isPermissionToggleGranted(toggle))
         return@request
       }
+      Log.i(TAG, "Requesting permissions: $missing for toggle: $toggle")
       pendingPermissionToggle = toggle
       togglePermissionLauncher.launch(missing.toTypedArray())
     }
 
   val requestSpecialAccessToggle: (SpecialAccessToggle, Boolean) -> Unit =
     request@{ toggle, enabled ->
+      Log.d(TAG, "requestSpecialAccessToggle: toggle=$toggle, enabled=$enabled")
       if (!enabled) {
         setSpecialAccessToggleEnabled(toggle, false)
         pendingSpecialAccessToggle = null
+        Log.d(TAG, "Special access toggle disabled: $toggle")
         return@request
       }
       val grantedNow =
@@ -442,10 +473,12 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
           SpecialAccessToggle.NotificationListener -> isNotificationListenerEnabled(context)
         }
       if (grantedNow) {
+        Log.d(TAG, "Special access already granted for $toggle")
         setSpecialAccessToggleEnabled(toggle, true)
         pendingSpecialAccessToggle = null
         return@request
       }
+      Log.i(TAG, "Opening settings for special access: $toggle")
       pendingSpecialAccessToggle = toggle
       when (toggle) {
         SpecialAccessToggle.NotificationListener -> openNotificationListenerSettings(context)
@@ -453,16 +486,20 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
     }
 
   DisposableEffect(lifecycleOwner, context, pendingSpecialAccessToggle) {
+    Log.d(TAG, "DisposableEffect registered for lifecycle changes")
     val observer =
       LifecycleEventObserver { _, event ->
         if (event != Lifecycle.Event.ON_RESUME) {
           return@LifecycleEventObserver
         }
+        Log.d(TAG, "Lifecycle ON_RESUME event received")
         when (pendingSpecialAccessToggle) {
           SpecialAccessToggle.NotificationListener -> {
+            val enabled = isNotificationListenerEnabled(context)
+            Log.i(TAG, "Notification listener access check after resume: enabled=$enabled")
             setSpecialAccessToggleEnabled(
               SpecialAccessToggle.NotificationListener,
-              isNotificationListenerEnabled(context),
+              enabled,
             )
             pendingSpecialAccessToggle = null
           }
@@ -470,13 +507,20 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
         }
       }
     lifecycleOwner.lifecycle.addObserver(observer)
-    onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    onDispose { 
+      Log.d(TAG, "DisposableEffect disposed")
+      lifecycleOwner.lifecycle.removeObserver(observer) 
+    }
   }
 
   if (pendingTrust != null) {
     val prompt = pendingTrust!!
+    Log.i(TAG, "Showing gateway trust prompt: fingerprint=${prompt.fingerprintSha256.take(16)}...")
     AlertDialog(
-      onDismissRequest = { viewModel.declineGatewayTrustPrompt() },
+      onDismissRequest = { 
+        Log.i(TAG, "User declined gateway trust prompt")
+        viewModel.declineGatewayTrustPrompt() 
+      },
       containerColor = onboardingSurface,
       title = { Text("Trust this gateway?", style = onboardingHeadlineStyle, color = onboardingText) },
       text = {
@@ -488,7 +532,10 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
       },
       confirmButton = {
         TextButton(
-          onClick = { viewModel.acceptGatewayTrustPrompt() },
+          onClick = { 
+            Log.i(TAG, "User accepted gateway trust prompt")
+            viewModel.acceptGatewayTrustPrompt() 
+          },
           colors = ButtonDefaults.textButtonColors(contentColor = onboardingAccent),
         ) {
           Text("Trust and continue")
@@ -556,50 +603,48 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
               gatewayPassword = gatewayPassword,
               gatewayError = gatewayError,
               onScanQrClick = {
+                Log.i(TAG, "QR scan button clicked - launching scanner activity")
                 gatewayError = null
-                qrScanner.startScan()
-                  .addOnSuccessListener { barcode ->
-                    val contents = barcode.rawValue?.trim().orEmpty()
-                    if (contents.isEmpty()) {
-                      return@addOnSuccessListener
-                    }
-                    val scannedSetupCode = resolveScannedSetupCode(contents)
-                    if (scannedSetupCode == null) {
-                      gatewayError = "QR code did not contain a valid setup code."
-                      return@addOnSuccessListener
-                    }
-                    setupCode = scannedSetupCode
-                    gatewayInputMode = GatewayInputMode.SetupCode
-                    gatewayError = null
-                    attemptedConnect = false
-                  }
-                  .addOnCanceledListener {
-                    // User dismissed the scanner; preserve current form state.
-                  }
-                  .addOnFailureListener {
-                    gatewayError = qrScannerErrorMessage()
-                  }
+                // Launch QR scanner activity and wait for result
+                val scannerIntent = Intent(context, QrScannerActivity::class.java)
+                qrScannerLauncher.launch(scannerIntent)
               },
-              onAdvancedOpenChange = { gatewayAdvancedOpen = it },
+              onAdvancedOpenChange = { 
+                Log.d(TAG, "Advanced setup toggle changed: open=$it")
+                gatewayAdvancedOpen = it 
+              },
               onInputModeChange = {
+                Log.d(TAG, "Gateway input mode changed: $it")
                 gatewayInputMode = it
                 gatewayError = null
               },
               onSetupCodeChange = {
+                Log.d(TAG, "Setup code changed, new length=${it.length}")
                 setupCode = it
                 gatewayError = null
               },
               onManualHostChange = {
+                Log.d(TAG, "Manual host changed: $it")
                 manualHost = it
                 gatewayError = null
               },
               onManualPortChange = {
+                Log.d(TAG, "Manual port changed: $it")
                 manualPort = it
                 gatewayError = null
               },
-              onManualTlsChange = { manualTls = it },
-              onTokenChange = viewModel::setGatewayToken,
-              onPasswordChange = { gatewayPassword = it },
+              onManualTlsChange = { 
+                Log.d(TAG, "Manual TLS toggle changed: $it")
+                manualTls = it 
+              },
+              onTokenChange = { 
+                Log.d(TAG, "Gateway token changed, new length=${it.length}")
+                viewModel.setGatewayToken(it) 
+              },
+              onPasswordChange = { 
+                Log.d(TAG, "Gateway password changed, new length=${it.length}")
+                gatewayPassword = it 
+              },
             )
           OnboardingStep.Permissions ->
             PermissionsStep(
@@ -621,6 +666,7 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
               enableCallLog = enableCallLog,
               context = context,
               onDiscoveryChange = { checked ->
+                Log.d(TAG, "Discovery permission toggle changed: $checked")
                 requestPermissionToggle(
                   PermissionToggle.Discovery,
                   checked,
@@ -628,6 +674,7 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
                 )
               },
               onLocationChange = { checked ->
+                Log.d(TAG, "Location permission toggle changed: $checked")
                 requestPermissionToggle(
                   PermissionToggle.Location,
                   checked,
@@ -638,6 +685,7 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
                 )
               },
               onNotificationsChange = { checked ->
+                Log.d(TAG, "Notifications permission toggle changed: $checked")
                 if (!notificationsPermissionRequired) {
                   setPermissionToggleEnabled(PermissionToggle.Notifications, checked)
                 } else {
@@ -649,9 +697,11 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
                 }
               },
               onNotificationListenerChange = { checked ->
+                Log.d(TAG, "Notification listener toggle changed: $checked")
                 requestSpecialAccessToggle(SpecialAccessToggle.NotificationListener, checked)
               },
               onMicrophoneChange = { checked ->
+                Log.d(TAG, "Microphone permission toggle changed: $checked")
                 requestPermissionToggle(
                   PermissionToggle.Microphone,
                   checked,
@@ -659,6 +709,7 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
                 )
               },
               onCameraChange = { checked ->
+                Log.d(TAG, "Camera permission toggle changed: $checked")
                 requestPermissionToggle(
                   PermissionToggle.Camera,
                   checked,
@@ -666,6 +717,7 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
                 )
               },
               onPhotosChange = { checked ->
+                Log.d(TAG, "Photos permission toggle changed: $checked")
                 requestPermissionToggle(
                   PermissionToggle.Photos,
                   checked,
@@ -673,6 +725,7 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
                 )
               },
               onContactsChange = { checked ->
+                Log.d(TAG, "Contacts permission toggle changed: $checked")
                 requestPermissionToggle(
                   PermissionToggle.Contacts,
                   checked,
@@ -683,6 +736,7 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
                 )
               },
               onCalendarChange = { checked ->
+                Log.d(TAG, "Calendar permission toggle changed: $checked")
                 requestPermissionToggle(
                   PermissionToggle.Calendar,
                   checked,
@@ -693,9 +747,12 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
                 )
               },
               onMotionChange = { checked ->
+                Log.d(TAG, "Motion permission toggle changed: $checked, motionAvailable=$motionAvailable")
                 if (!motionAvailable) {
+                  Log.w(TAG, "Motion toggle attempted but not available")
                   setPermissionToggleEnabled(PermissionToggle.Motion, false)
                 } else if (!motionPermissionRequired) {
+                  Log.d(TAG, "Motion permission not required, setting directly")
                   setPermissionToggleEnabled(PermissionToggle.Motion, checked)
                 } else {
                   requestPermissionToggle(
@@ -706,7 +763,9 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
                 }
               },
               onSmsChange = { checked ->
+                Log.d(TAG, "SMS permission toggle changed: $checked, smsAvailable=$smsAvailable")
                 if (!smsAvailable) {
+                  Log.w(TAG, "SMS toggle attempted but not available")
                   setPermissionToggleEnabled(PermissionToggle.Sms, false)
                 } else {
                   requestPermissionToggle(
@@ -717,7 +776,9 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
                 }
               },
               onCallLogChange = { checked ->
+                Log.d(TAG, "Call log permission toggle changed: $checked, callLogAvailable=$callLogAvailable")
                 if (!callLogAvailable) {
+                  Log.w(TAG, "Call log toggle attempted but not available")
                   setPermissionToggleEnabled(PermissionToggle.CallLog, false)
                 } else {
                   requestPermissionToggle(
@@ -758,6 +819,7 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
         ) {
           IconButton(
             onClick = {
+              Log.d(TAG, "Back button clicked: current step=$step")
               step =
                 when (step) {
                   OnboardingStep.Welcome -> OnboardingStep.Welcome
@@ -765,6 +827,7 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
                   OnboardingStep.Permissions -> OnboardingStep.Gateway
                   OnboardingStep.FinalCheck -> OnboardingStep.Permissions
                 }
+              Log.i(TAG, "Navigated to step: $step")
             },
             enabled = backEnabled,
           ) {
@@ -779,7 +842,10 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
         when (step) {
           OnboardingStep.Welcome -> {
             Button(
-              onClick = { step = OnboardingStep.Gateway },
+              onClick = { 
+                Log.i(TAG, "Welcome Next button clicked - navigating to Gateway step")
+                step = OnboardingStep.Gateway 
+              },
               modifier = Modifier.weight(1f).height(52.dp),
               shape = RoundedCornerShape(14.dp),
               colors = onboardingPrimaryButtonColors(),
@@ -790,24 +856,30 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
           OnboardingStep.Gateway -> {
             Button(
               onClick = {
+                Log.i(TAG, "Gateway Next button clicked, inputMode=$gatewayInputMode")
                 if (gatewayInputMode == GatewayInputMode.SetupCode) {
                   val parsedSetup = decodeGatewaySetupCode(setupCode)
                   if (parsedSetup == null) {
+                    Log.e(TAG, "Invalid setup code: '$setupCode'")
                     gatewayError = "Scan QR code first, or use Advanced setup."
                     return@Button
                   }
                   val parsedGateway = parseGatewayEndpoint(parsedSetup.url)
                   if (parsedGateway == null) {
+                    Log.e(TAG, "Invalid gateway URL in setup code: ${parsedSetup.url}")
                     gatewayError = "Setup code has invalid gateway URL."
                     return@Button
                   }
                   gatewayUrl = parsedSetup.url
+                  Log.i(TAG, "Parsed gateway URL from setup code: $gatewayUrl")
                   viewModel.setGatewayBootstrapToken(parsedSetup.bootstrapToken.orEmpty())
                   val sharedToken = parsedSetup.token.orEmpty().trim()
                   val password = parsedSetup.password.orEmpty().trim()
                   if (sharedToken.isNotEmpty()) {
+                    Log.i(TAG, "Using shared token from setup code")
                     viewModel.setGatewayToken(sharedToken)
                   } else if (!parsedSetup.bootstrapToken.isNullOrBlank()) {
+                    Log.i(TAG, "Using bootstrap token, clearing shared token")
                     viewModel.setGatewayToken("")
                   }
                   gatewayPassword = password
@@ -818,13 +890,16 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
                   val manualUrl = composeGatewayManualUrl(manualHost, manualPort, manualTls)
                   val parsedGateway = manualUrl?.let(::parseGatewayEndpoint)
                   if (parsedGateway == null) {
+                    Log.e(TAG, "Invalid manual endpoint: host=$manualHost, port=$manualPort, tls=$manualTls")
                     gatewayError = "Manual endpoint is invalid."
                     return@Button
                   }
                   gatewayUrl = parsedGateway.displayUrl
+                  Log.i(TAG, "Manual gateway URL: $gatewayUrl")
                   viewModel.setGatewayBootstrapToken("")
                 }
                 step = OnboardingStep.Permissions
+                Log.i(TAG, "Navigated to Permissions step")
               },
               modifier = Modifier.weight(1f).height(52.dp),
               shape = RoundedCornerShape(14.dp),
@@ -836,6 +911,8 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
           OnboardingStep.Permissions -> {
             Button(
               onClick = {
+                Log.i(TAG, "Permissions Next button clicked")
+                Log.i(TAG, "Camera enabled: $enableCamera, Location enabled: $enableLocation")
                 viewModel.setCameraEnabled(enableCamera)
                 viewModel.setLocationMode(if (enableLocation) LocationMode.WhileUsing else LocationMode.Off)
                 proceedFromPermissions()
@@ -850,7 +927,10 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
           OnboardingStep.FinalCheck -> {
             if (isConnected) {
               Button(
-                onClick = { viewModel.setOnboardingCompleted(true) },
+                onClick = { 
+                  Log.i(TAG, "Finish button clicked - onboarding completed successfully")
+                  viewModel.setOnboardingCompleted(true) 
+                },
                 modifier = Modifier.weight(1f).height(52.dp),
                 shape = RoundedCornerShape(14.dp),
                 colors = onboardingPrimaryButtonColors(),
@@ -860,29 +940,36 @@ fun OnboardingFlow(viewModel: MainViewModel, modifier: Modifier = Modifier) {
             } else {
               Button(
                 onClick = {
+                  Log.i(TAG, "Connect button clicked")
                   val parsed = parseGatewayEndpoint(gatewayUrl)
                   if (parsed == null) {
+                    Log.e(TAG, "Invalid gateway URL: $gatewayUrl")
                     step = OnboardingStep.Gateway
                     gatewayError = "Invalid gateway URL."
                     return@Button
                   }
                   val token = persistedGatewayToken.trim()
                   val password = gatewayPassword.trim()
+                  Log.i(TAG, "Connecting with token length=${token.length}, password length=${password.length}")
                   attemptedConnect = true
                   viewModel.setManualEnabled(true)
                   viewModel.setManualHost(parsed.host)
                   viewModel.setManualPort(parsed.port)
                   viewModel.setManualTls(parsed.tls)
                   if (gatewayInputMode == GatewayInputMode.Manual) {
+                    Log.d(TAG, "Manual mode - clearing bootstrap token")
                     viewModel.setGatewayBootstrapToken("")
                   }
                   if (token.isNotEmpty()) {
+                    Log.d(TAG, "Setting gateway token")
                     viewModel.setGatewayToken(token)
                   } else {
+                    Log.d(TAG, "Clearing gateway token")
                     viewModel.setGatewayToken("")
                   }
                   viewModel.setGatewayPassword(password)
                   viewModel.connectManual()
+                  Log.i(TAG, "Connection attempt initiated")
                 },
                 modifier = Modifier.weight(1f).height(52.dp),
                 shape = RoundedCornerShape(14.dp),
@@ -1022,6 +1109,7 @@ private fun GatewayStep(
   val manualResolvedEndpoint = remember(manualHost, manualPort, manualTls) { composeGatewayManualUrl(manualHost, manualPort, manualTls)?.let { parseGatewayEndpoint(it)?.displayUrl } }
 
   StepShell(title = "Gateway Connection") {
+    Log.d(TAG, "GatewayStep rendered, inputMode=$inputMode, advancedOpen=$advancedOpen")
     Text(
       "Run `openclaw qr` on your gateway host, then scan the code with this device.",
       style = onboardingCalloutStyle,
@@ -1540,6 +1628,8 @@ private fun FinalStep(
   val showDiagnostics = gatewayStatusHasDiagnostics(statusText)
   val pairingRequired = gatewayStatusLooksLikePairing(statusText)
 
+  Log.d(TAG, "FinalStep rendered, isConnected=$isConnected, attemptedConnect=$attemptedConnect, status=$statusText")
+
   Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
     Text("Review", style = onboardingTitle1Style, color = onboardingText)
 
@@ -1699,6 +1789,7 @@ private fun FinalStep(
             )
             Button(
               onClick = {
+                Log.i(TAG, "Copy report button clicked")
                 copyGatewayDiagnosticsReport(
                   context = context,
                   screen = "onboarding final check",
@@ -1834,7 +1925,9 @@ private fun FeatureCard(
 }
 
 private fun isPermissionGranted(context: Context, permission: String): Boolean {
-  return ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+  val granted = ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+  Log.d(TAG, "isPermissionGranted: $permission = $granted")
+  return granted
 }
 
 private fun qrScannerErrorMessage(): String {
@@ -1842,7 +1935,9 @@ private fun qrScannerErrorMessage(): String {
 }
 
 private fun isNotificationListenerEnabled(context: Context): Boolean {
-  return DeviceNotificationListenerService.isAccessEnabled(context)
+  val enabled = DeviceNotificationListenerService.isAccessEnabled(context)
+  Log.d(TAG, "isNotificationListenerEnabled: $enabled")
+  return enabled
 }
 
 private fun openNotificationListenerSettings(context: Context) {

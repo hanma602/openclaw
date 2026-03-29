@@ -1,6 +1,7 @@
 package ai.openclaw.app
 
 import android.os.Bundle
+import android.util.Log
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -15,6 +16,8 @@ import ai.openclaw.app.ui.RootScreen
 import ai.openclaw.app.ui.OpenClawTheme
 import kotlinx.coroutines.launch
 
+private const val TAG = "MainActivity"
+
 class MainActivity : ComponentActivity() {
   private val viewModel: MainViewModel by viewModels()
   private lateinit var permissionRequester: PermissionRequester
@@ -22,13 +25,16 @@ class MainActivity : ComponentActivity() {
   private var didStartNodeService = false
 
   override fun onCreate(savedInstanceState: Bundle?) {
+    Log.i(TAG, "MainActivity onCreate called")
     super.onCreate(savedInstanceState)
+    Log.d(TAG, "Setting up window and permission requester")
     WindowCompat.setDecorFitsSystemWindows(window, false)
     permissionRequester = PermissionRequester(this)
 
     lifecycleScope.launch {
       repeatOnLifecycle(Lifecycle.State.STARTED) {
         viewModel.preventSleep.collect { enabled ->
+          Log.d(TAG, "Prevent sleep mode changed: $enabled")
           if (enabled) {
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
           } else {
@@ -42,31 +48,37 @@ class MainActivity : ComponentActivity() {
       repeatOnLifecycle(Lifecycle.State.STARTED) {
         viewModel.runtimeInitialized.collect { ready ->
           if (!ready || didAttachRuntimeUi) return@collect
+          Log.i(TAG, "Runtime initialized - attaching UI and starting node service")
           viewModel.attachRuntimeUi(owner = this@MainActivity, permissionRequester = permissionRequester)
           didAttachRuntimeUi = true
           if (!didStartNodeService) {
             NodeForegroundService.start(this@MainActivity)
             didStartNodeService = true
+            Log.i(TAG, "NodeForegroundService started")
           }
         }
       }
     }
 
     setContent {
+      Log.d(TAG, "Composing app content with OpenClawTheme")
       OpenClawTheme {
         Surface(modifier = Modifier) {
           RootScreen(viewModel = viewModel)
         }
       }
     }
+    Log.i(TAG, "MainActivity setup completed")
   }
 
   override fun onStart() {
     super.onStart()
+    Log.d(TAG, "MainActivity onStart - setting foreground")
     viewModel.setForeground(true)
   }
 
   override fun onStop() {
+    Log.d(TAG, "MainActivity onStop - setting background")
     viewModel.setForeground(false)
     super.onStop()
   }

@@ -5,6 +5,7 @@ import ai.openclaw.app.protocol.OpenClawCalendarCommand
 import ai.openclaw.app.protocol.OpenClawCanvasA2UICommand
 import ai.openclaw.app.protocol.OpenClawCanvasCommand
 import ai.openclaw.app.protocol.OpenClawCameraCommand
+import ai.openclaw.app.protocol.OpenClawAppCommand
 import ai.openclaw.app.protocol.OpenClawCallLogCommand
 import ai.openclaw.app.protocol.OpenClawContactsCommand
 import ai.openclaw.app.protocol.OpenClawDeviceCommand
@@ -29,6 +30,7 @@ class InvokeDispatcher(
   private val a2uiHandler: A2UIHandler,
   private val debugHandler: DebugHandler,
   private val callLogHandler: CallLogHandler,
+  private val appLauncherHandler: AppLauncherHandler,
   private val isForeground: () -> Boolean,
   private val cameraEnabled: () -> Boolean,
   private val locationEnabled: () -> Boolean,
@@ -168,6 +170,11 @@ class InvokeDispatcher(
 
       // CallLog command
       OpenClawCallLogCommand.Search.rawValue -> callLogHandler.handleCallLogSearch(paramsJson)
+
+      // App Launcher commands
+      OpenClawAppCommand.LaunchBilibili.rawValue -> appLauncherHandler.handleLaunchBilibili(paramsJson)
+      OpenClawAppCommand.OpenFavorites.rawValue -> appLauncherHandler.handleOpenBilibiliFavorites(paramsJson)
+      OpenClawAppCommand.Launch.rawValue -> appLauncherHandler.handleLaunchApp(paramsJson)
 
       // Debug commands
       "debug.ed25519" -> debugHandler.handleEd25519()
